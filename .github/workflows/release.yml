@@ -1,0 +1,111 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"       # triggers on: git tag v0.1.0 && git push --tags
+  workflow_dispatch:   # also allows manual trigger from GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: LENS-windows.zip
+            exe_path: dist/LENS
+          - os: macos-latest
+            artifact: LENS-macos.zip
+            exe_path: dist/LENS
+          - os: ubuntu-22.04
+            artifact: LENS-linux.zip
+            exe_path: dist/LENS
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libegl1 libgl1-mesa-glx libglib2.0-0 \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xfixes0 \
+            xvfb
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install PyQt6 pyqtgraph httpx pandas lxml pyinstaller
+          pip install -e . --no-deps
+
+      - name: Build with PyInstaller
+        env:
+          # Linux needs a virtual display for Qt to initialise during build
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pyinstaller lens.spec --clean --noconfirm
+
+      - name: Zip artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/LENS -DestinationPath ${{ matrix.artifact }}
+
+      - name: Zip artifact (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: zip -r ${{ matrix.artifact }} dist/LENS
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "LENS ${{ github.ref_name }}"
+          body: |
+            ## LENS ${{ github.ref_name }}
+
+            Download the build for your platform, extract the zip, and run the `LENS` executable inside.
+            No Python installation required.
+
+            | Platform | Download |
+            |---|---|
+            | Windows | `LENS-windows.zip` → run `LENS/LENS.exe` |
+            | macOS   | `LENS-macos.zip`   → run `LENS/LENS` (or `LENS.app`) |
+            | Linux   | `LENS-linux.zip`   → run `LENS/LENS` |
+
+            **First launch:** the app creates `~/.lens/` with a default config automatically.
+          files: |
+            LENS-windows.zip
+            LENS-macos.zip
+            LENS-linux.zip
+          draft: false
+          prerelease: false

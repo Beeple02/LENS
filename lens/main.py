@@ -36,8 +36,9 @@ def main() -> None:
     app.setOrganizationName("LENS")
     app.setStyle("Fusion")  # Base style to override completely
 
-    # Load global stylesheet
-    qss_path = Path(__file__).parent / "ui" / "stylesheet.qss"
+    # Load global stylesheet (works in dev and in PyInstaller bundle)
+    from lens._resources import resource_path
+    qss_path = resource_path("ui/stylesheet.qss")
     if qss_path.exists():
         app.setStyleSheet(qss_path.read_text())
 

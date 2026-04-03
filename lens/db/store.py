@@ -14,7 +14,8 @@ from lens.config import Config
 
 _config = Config()
 _DB_PATH = _config.db_path
-_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+from lens._resources import resource_path as _rp
+_SCHEMA_PATH = _rp("db/schema.sql")
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
