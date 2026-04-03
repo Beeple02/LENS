@@ -161,6 +161,7 @@ _NAV_ITEMS = [
     ("PORTFOLIO", "portfolio"),
     ("SCREENER",  "screener"),
     ("SETTINGS",  "settings"),
+    ("DEVLOGS",   "devlogs"),
 ]
 
 _FKEY_HINTS = [
@@ -261,6 +262,7 @@ class MainWindow(QMainWindow):
         from lens.ui.screens.screener import ScreenerScreen
         from lens.ui.screens.chart import ChartScreen
         from lens.ui.screens.settings import SettingsScreen
+        from lens.ui.screens.devlogs import DevLogsScreen
 
         self._screens = {
             "dashboard": DashboardScreen(self._config),
@@ -269,6 +271,7 @@ class MainWindow(QMainWindow):
             "screener":  ScreenerScreen(self._config),
             "chart":     ChartScreen(self._config),
             "settings":  SettingsScreen(self._config),
+            "devlogs":   DevLogsScreen(self._config),
         }
         for screen in self._screens.values():
             self._stack.addWidget(screen)

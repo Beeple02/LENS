@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
+import logging
+
 from PyQt6.QtCore import QThread, pyqtSignal
+
+_log = logging.getLogger("lens.workers")
 
 
 def _run(coro: Any) -> Any:
@@ -90,8 +94,10 @@ class FetchChartWorker(QThread):
         try:
             from lens.data.yahoo import get_chart
             data = _run(get_chart(self.ticker, self.interval, self.range_))
+            _log.debug("Chart loaded: %s  %s bars", self.ticker, len(data))
             self.result.emit(data)
         except Exception as e:
+            _log.error("Chart fetch failed [%s]: %s", self.ticker, e)
             self.error.emit(str(e))
 
 
@@ -124,6 +130,7 @@ class FetchFundamentalsWorker(QThread):
                 row = get_latest_fundamentals(self.ticker)
                 self.result.emit(dict(row) if row else {})
         except Exception as e:
+            _log.error("Fundamentals fetch failed [%s]: %s", self.ticker, e)
             self.error.emit(str(e))
 
 

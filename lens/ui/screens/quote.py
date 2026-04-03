@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -74,20 +74,52 @@ class QuoteHeader(QFrame):
         self._meta = QLabel()
         self._meta.setStyleSheet("font-size: 11px; color: #555555; margin-left: 16px;")
 
+        self._add_btn = QPushButton("+ WATCHLIST")
+        self._add_btn.setProperty("class", "interval-btn")
+        self._add_btn.setEnabled(False)
+        self._add_btn.setFixedWidth(100)
+        self._add_btn.clicked.connect(self._on_add_watchlist)
+
         layout.addWidget(self._name)
         layout.addWidget(self._ticker)
         layout.addWidget(self._isin)
         layout.addWidget(self._meta)
         layout.addStretch()
+        layout.addWidget(self._add_btn)
+
+        self._current_ticker: str = ""
 
     def update(self, sec: dict) -> None:
+        self._current_ticker = sec.get("ticker", "")
         self._name.setText(sec.get("name", ""))
-        self._ticker.setText(sec.get("ticker", ""))
+        self._ticker.setText(self._current_ticker)
         isin = sec.get("isin", "")
         self._isin.setText(isin or "")
         self._isin.setVisible(bool(isin))
         parts = [sec.get("mic", ""), sec.get("currency", ""), sec.get("sector", "")]
         self._meta.setText("  ·  ".join(p for p in parts if p))
+        self._add_btn.setEnabled(bool(self._current_ticker))
+        self._add_btn.setText("+ WATCHLIST")
+
+    def _on_add_watchlist(self) -> None:
+        if not self._current_ticker:
+            return
+        import logging
+        from lens.db.store import add_to_watchlist, create_watchlist
+        from lens.config import Config
+        wl = Config().default_watchlist
+        try:
+            create_watchlist(wl)
+            add_to_watchlist(wl, self._current_ticker)
+            self._add_btn.setText("✓ ADDED")
+            logging.getLogger("lens").info(
+                "Added %s to watchlist '%s'", self._current_ticker, wl
+            )
+            QTimer.singleShot(2500, lambda: self._add_btn.setText("+ WATCHLIST"))
+        except Exception as e:
+            logging.getLogger("lens").error(
+                "Failed to add %s to watchlist: %s", self._current_ticker, e
+            )
 
 
 class PricePanel(QFrame):
