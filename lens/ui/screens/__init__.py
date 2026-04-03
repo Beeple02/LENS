@@ -1,1 +1,1 @@
-"""LENS TUI screens."""
+"""LENS Qt screens."""

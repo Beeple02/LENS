@@ -1,373 +1,410 @@
-"""Dashboard screen — main view for LENS TUI."""
+"""Dashboard screen — watchlist | chart | stats."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Optional
 
-from rich.text import Text
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.message import Message
-from textual.reactive import reactive
-from textual.screen import Screen
-from textual.widget import Widget
-from textual.widgets import DataTable, Footer, Header, Label, Static
-
-from lens.config import Config
-from lens.db import store
-from lens.ui.widgets import (
-    ClockWidget,
-    MarketStatusWidget,
-    SparklineWidget,
-    _is_xpar_open,
-    _sparkline,
-    fmt_change,
-    fmt_large,
-    fmt_number,
-    fmt_pct,
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSplitter,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
-_config = Config()
+from lens.ui.widgets.chart_widget import ChartWidget
+from lens.ui.widgets.data_table import (
+    DataTable,
+    COLOR_POS,
+    COLOR_NEG,
+    COLOR_DIM,
+    COLOR_AMB,
+    COLOR_TEXT,
+    MONO,
+    _item,
+    _large_num,
+)
+from lens.ui.widgets.stat_card import StatCard
+
+WATCHLIST_COLS = ["Ticker", "Last", "Chg%", "Volume", "High", "Low"]
+STATS_FIELDS = [
+    ("P/E",        "pe_ratio",       None),
+    ("P/B",        "pb_ratio",       None),
+    ("Div Yield",  "dividend_yield", "pct_mult"),
+    ("Mkt Cap",    "market_cap",     "large"),
+    ("EV/EBITDA",  "ev_ebitda",      None),
+    ("ROE",        "roe",            "pct_mult"),
+    ("Rev TTM",    "revenue_ttm",    "large"),
+    ("52w High",   None,             "quote_high"),
+    ("52w Low",    None,             "quote_low"),
+]
 
 
-class WatchlistTable(Static):
-    """Left panel: watchlist with live prices."""
+def _fmt(v, decimals=2, suffix="", prefix=""):
+    if v is None:
+        return "—"
+    return f"{prefix}{v:,.{decimals}f}{suffix}"
 
-    BORDER_TITLE = "Watchlist"
 
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._table: Optional[DataTable] = None
-        self._rows: list[dict[str, Any]] = []
-        self._selected_ticker: Optional[str] = None
+def _fmt_pct(v):
+    if v is None:
+        return "—"
+    return f"{v * 100:.2f}%"
 
-    def compose(self) -> ComposeResult:
-        table = DataTable(id="watchlist-table", cursor_type="row", show_header=True)
-        table.add_columns("Ticker", "Price", "Change", "Change%", "Vol")
-        yield table
 
-    def on_mount(self) -> None:
-        self._table = self.query_one("#watchlist-table", DataTable)
+class WatchlistPanel(QFrame):
+    """Left panel — watchlist table with live prices."""
 
-    def update_rows(self, rows: list[dict[str, Any]]) -> None:
-        """Refresh the watchlist table with new price data."""
-        if not self._table:
-            return
-        self._table.clear()
-        for row in rows:
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "panel")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QLabel("WATCHLIST")
+        header.setProperty("class", "section-header")
+        header.setContentsMargins(12, 8, 12, 8)
+        layout.addWidget(header)
+
+        self._table = DataTable(WATCHLIST_COLS)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._context_menu)
+
+        # Sizing
+        hdr = self._table.horizontalHeader()
+        from PyQt6.QtWidgets import QHeaderView
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(0, 72)
+        self._table.setColumnWidth(1, 84)
+        self._table.setColumnWidth(2, 72)
+        self._table.setColumnWidth(4, 72)
+        self._table.setColumnWidth(5, 72)
+
+        layout.addWidget(self._table)
+
+        self._loading = QLabel("Loading…")
+        self._loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading.setStyleSheet("color: #555555; font-size: 12px;")
+        self._loading.hide()
+        layout.addWidget(self._loading)
+
+        self._rows: list[dict] = []
+        self._table.currentCellChanged.connect(lambda cr, cc, pr, pc: self._on_row_changed(cr))
+
+    # Public signals
+    ticker_selected = None  # set externally
+    remove_requested = None
+
+    def set_loading(self, loading: bool) -> None:
+        self._loading.setVisible(loading)
+        self._table.setVisible(not loading)
+
+    def update_rows(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.set_loading(False)
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(rows))
+
+        for i, row in enumerate(rows):
             ticker = row.get("ticker", "")
             price = row.get("price")
             change = row.get("change")
             change_pct = row.get("change_pct")
             volume = row.get("volume")
+            high = row.get("high")
+            low = row.get("low")
 
-            price_text = Text(f"{price:,.2f}" if price else "──────", style="#f59e0b")
-            change_text = fmt_change(change)
-            change_pct_text = fmt_change(change_pct, is_pct=True)
-            vol_text = Text(
-                fmt_large(volume, currency="").strip() if volume else "──",
-                style="#666666",
+            color = COLOR_POS if (change and change > 0) else (COLOR_NEG if (change and change < 0) else COLOR_TEXT)
+
+            self._table.setItem(i, 0, _item(ticker, color=COLOR_AMB, bold=True))
+            self._table.setItem(i, 1, _item(
+                f"{price:,.2f}" if price else "—",
+                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                color=color, mono=True,
+            ))
+            pct_str = (
+                f"{'+'if change_pct > 0 else ''}{change_pct:.2f}%"
+                if change_pct is not None else "—"
             )
-            self._table.add_row(
-                Text(ticker, style="#e8e8e8 bold"),
-                price_text,
-                change_text,
-                change_pct_text,
-                vol_text,
-                key=ticker,
-            )
+            self._table.setItem(i, 2, _item(
+                pct_str,
+                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                color=color, mono=True,
+            ))
+            self._table.setItem(i, 3, _item(
+                _large_num(volume, currency="").strip() if volume else "—",
+                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                color=COLOR_DIM, mono=True,
+            ))
+            self._table.setItem(i, 4, _item(
+                _fmt(high) if high else "—",
+                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                color=COLOR_DIM, mono=True,
+            ))
+            self._table.setItem(i, 5, _item(
+                _fmt(low) if low else "—",
+                align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                color=COLOR_DIM, mono=True,
+            ))
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        self._selected_ticker = event.row_key.value if event.row_key else None
-        self.post_message(DashboardScreen.TickerSelected(self._selected_ticker))
+        self._table.setSortingEnabled(True)
 
+    def _on_row_changed(self, row: int) -> None:
+        if 0 <= row < len(self._rows):
+            data = self._rows[row]
+            if callable(self.ticker_selected):
+                self.ticker_selected(data)
 
-class ChartPanel(Static):
-    """Center panel: sparkline/price chart for selected security."""
-
-    BORDER_TITLE = "Chart"
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._ticker: Optional[str] = None
-        self._prices: list[float] = []
-
-    def compose(self) -> ComposeResult:
-        yield Label("Select a security from the watchlist", id="chart-hint", classes="dim")
-        yield SparklineWidget(id="dashboard-spark", width=60)
-        yield Label("", id="chart-meta", classes="dim")
-
-    def update_chart(self, ticker: str, prices: list[float], meta: dict[str, Any]) -> None:
-        self._ticker = ticker
-        self._prices = prices
-
-        hint = self.query_one("#chart-hint", Label)
-        hint.update(
-            Text(ticker, style="#f59e0b bold") +
-            Text(f"  {meta.get('name', '')}", style="#e8e8e8") +
-            Text("  30d", style="#666666")
-        )
-
-        spark = self.query_one("#dashboard-spark", SparklineWidget)
-        spark.values = prices
-
-        chart_meta = self.query_one("#chart-meta", Label)
-        price = meta.get("price")
-        low_52w = meta.get("day_low_52w")
-        high_52w = meta.get("day_high_52w")
-
-        meta_parts = []
-        if price is not None:
-            meta_parts.append(f"Last: {price:,.2f}")
-        if low_52w is not None:
-            meta_parts.append(f"52w Low: {low_52w:,.2f}")
-        if high_52w is not None:
-            meta_parts.append(f"52w High: {high_52w:,.2f}")
-        chart_meta.update(Text("  ".join(meta_parts), style="#666666"))
+    def _context_menu(self, pos) -> None:
+        row = self._table.rowAt(pos.y())
+        if row < 0 or row >= len(self._rows):
+            return
+        ticker = self._rows[row].get("ticker", "")
+        menu = QMenu(self)
+        open_chart = menu.addAction(f"Open chart — {ticker}")
+        remove = menu.addAction(f"Remove {ticker} from watchlist")
+        action = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if action == remove and callable(self.remove_requested):
+            self.remove_requested(ticker)
+        elif action == open_chart and callable(self.ticker_selected):
+            self.ticker_selected(self._rows[row], open_chart=True)
 
 
-class FundamentalsPanel(Static):
-    """Right panel: quick fundamentals for selected security."""
+class StatsPanel(QFrame):
+    """Right panel — key fundamentals as stat cards."""
 
-    BORDER_TITLE = "Fundamentals"
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "panel")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    def compose(self) -> ComposeResult:
-        yield Label("", id="fund-content")
+        self._header = QLabel("FUNDAMENTALS")
+        self._header.setProperty("class", "section-header")
+        self._header.setContentsMargins(12, 8, 12, 4)
+        layout.addWidget(self._header)
 
-    def update_fundamentals(self, ticker: str, fund: Optional[Any]) -> None:
-        content = self.query_one("#fund-content", Label)
-        if fund is None:
-            content.update(Text("No data", style="#666666"))
+        self._name_label = QLabel("")
+        self._name_label.setContentsMargins(12, 4, 12, 8)
+        self._name_label.setStyleSheet("color: #e8e8e8; font-size: 12px; font-weight: 600;")
+        layout.addWidget(self._name_label)
+
+        grid_widget = QWidget()
+        self._grid = QGridLayout(grid_widget)
+        self._grid.setContentsMargins(8, 4, 8, 8)
+        self._grid.setSpacing(6)
+
+        self._cards: dict[str, StatCard] = {}
+        labels = ["P/E", "P/B", "Div Yield", "Mkt Cap", "EV/EBITDA", "ROE",
+                  "Rev TTM", "52w High", "52w Low"]
+        for idx, lbl in enumerate(labels):
+            card = StatCard(lbl)
+            self._cards[lbl] = card
+            row, col = divmod(idx, 2)
+            self._grid.addWidget(card, row, col)
+
+        layout.addWidget(grid_widget)
+        layout.addStretch()
+
+    def update_security(self, name: str, fund: Optional[dict], quote: Optional[dict]) -> None:
+        self._name_label.setText(name)
+        fund = fund or {}
+        quote = quote or {}
+
+        def s(f_key, mode=None):
+            v = fund.get(f_key)
+            if mode == "pct_mult":
+                return _fmt_pct(v)
+            elif mode == "large":
+                return _large_num(v)
+            return _fmt(v, decimals=1) if v is not None else "—"
+
+        self._cards["P/E"].set_value(s("pe_ratio"))
+        self._cards["P/B"].set_value(s("pb_ratio"))
+        self._cards["Div Yield"].set_value(s("dividend_yield", "pct_mult"))
+        self._cards["Mkt Cap"].set_value(s("market_cap", "large"))
+        self._cards["EV/EBITDA"].set_value(s("ev_ebitda"))
+        self._cards["ROE"].set_value(s("roe", "pct_mult"))
+        self._cards["Rev TTM"].set_value(s("revenue_ttm", "large"))
+
+        h52 = quote.get("day_high_52w")
+        l52 = quote.get("day_low_52w")
+        self._cards["52w High"].set_value(_fmt(h52) if h52 else "—")
+        self._cards["52w Low"].set_value(_fmt(l52) if l52 else "—")
+
+
+class DashboardScreen(QWidget):
+    """Main dashboard: watchlist | chart | stats."""
+
+    def __init__(self, config: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._selected_ticker: Optional[str] = None
+        self._selected_row: Optional[dict] = None
+        self._refresh_worker = None
+        self._chart_worker = None
+        self._fund_worker = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+
+        # Left: watchlist
+        self._watchlist_panel = WatchlistPanel()
+        self._watchlist_panel.ticker_selected = self._on_ticker_selected
+        self._watchlist_panel.remove_requested = self._on_remove_ticker
+        splitter.addWidget(self._watchlist_panel)
+
+        # Center: chart
+        center = QFrame()
+        center.setProperty("class", "panel")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+
+        chart_header = QLabel("CHART")
+        chart_header.setProperty("class", "section-header")
+        chart_header.setContentsMargins(12, 8, 12, 8)
+        center_layout.addWidget(chart_header)
+
+        self._chart_label = QLabel("Select a security from the watchlist")
+        self._chart_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._chart_label.setStyleSheet("color: #444444; font-size: 13px;")
+        center_layout.addWidget(self._chart_label)
+
+        self._chart = ChartWidget()
+        self._chart.hide()
+        center_layout.addWidget(self._chart)
+
+        splitter.addWidget(center)
+
+        # Right: stats
+        self._stats_panel = StatsPanel()
+        splitter.addWidget(self._stats_panel)
+
+        splitter.setSizes([280, 580, 240])
+        layout.addWidget(splitter)
+
+        # Auto-refresh timer
+        interval_ms = self._config.get("display", {}).get("refresh_interval", 30) * 1000
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._refresh_watchlist)
+        self._refresh_timer.start(interval_ms)
+
+    def on_show(self) -> None:
+        from lens.config import Config
+        cfg = Config()
+        self._watchlist_name = cfg.default_watchlist
+        self._refresh_watchlist()
+
+    def _refresh_watchlist(self) -> None:
+        from lens.ui.workers import FetchWatchlistWorker
+        from lens.config import Config
+        cfg = Config()
+        wl = getattr(self, "_watchlist_name", cfg.default_watchlist)
+
+        self._watchlist_panel.set_loading(True)
+        if self._refresh_worker and self._refresh_worker.isRunning():
             return
 
-        lines = Text()
-        def row(label: str, val: str, style: str = "#e8e8e8") -> None:
-            lines.append(f"{label:<12}", style="#666666")
-            lines.append(f"{val}\n", style=style)
+        self._refresh_worker = FetchWatchlistWorker(wl, self)
+        self._refresh_worker.result.connect(self._on_watchlist_result)
+        self._refresh_worker.error.connect(self._on_error)
+        self._refresh_worker.start()
 
-        row("P/E", fmt_number(fund["pe_ratio"], decimals=1))
-        row("Fwd P/E", fmt_number(fund["forward_pe"], decimals=1))
-        row("P/B", fmt_number(fund["pb_ratio"], decimals=2))
-        row("EV/EBITDA", fmt_number(fund["ev_ebitda"], decimals=1))
-        row("Div Yield", fmt_pct(fund["dividend_yield"], multiply=True))
-        row("Mkt Cap", fmt_large(fund["market_cap"]))
-        row("ROE", fmt_pct(fund["roe"], multiply=True))
-        row("ROA", fmt_pct(fund["roa"], multiply=True))
-        row("Rev Grw", fmt_pct(fund["revenue_growth"], multiply=True))
-        row("D/E", fmt_number(fund["debt_to_equity"], decimals=2))
+    def _on_watchlist_result(self, rows: list) -> None:
+        self._watchlist_panel.update_rows(rows)
+        # Auto-select first if nothing selected
+        if not self._selected_ticker and rows:
+            self._on_ticker_selected(rows[0])
 
-        content.update(lines)
-
-
-class DashboardScreen(Screen):
-    """Main dashboard screen."""
-
-    BINDINGS = [
-        Binding("d", "app.switch_screen('dashboard')", "Dashboard", show=True),
-        Binding("q", "app.push_screen('quote')", "Quote", show=True),
-        Binding("p", "app.push_screen('portfolio')", "Portfolio", show=True),
-        Binding("s", "app.push_screen('screener')", "Screener", show=True),
-        Binding("c", "app.push_screen('chart')", "Chart", show=True),
-        Binding("r", "refresh_data", "Refresh", show=True),
-        Binding("w", "app.push_screen('watchlist')", "Watchlists", show=False),
-        Binding("slash", "app.push_screen('search')", "Search", show=True),
-    ]
-
-    class TickerSelected(Message):
-        def __init__(self, ticker: Optional[str]) -> None:
-            super().__init__()
-            self.ticker = ticker
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="top-bar"):
-            yield ClockWidget(id="clock")
-            yield MarketStatusWidget(id="market-status")
-            yield Label("  LENS v0.1  ", id="app-label", classes="accent")
-        with Horizontal(id="main-area"):
-            with Vertical(id="left-panel", classes="panel"):
-                yield Label("WATCHLIST", classes="panel--title")
-                yield WatchlistTable(id="watchlist")
-            with Vertical(id="center-panel", classes="panel"):
-                yield Label("CHART", classes="panel--title")
-                yield ChartPanel(id="chart-panel")
-            with Vertical(id="right-panel", classes="panel"):
-                yield Label("FUNDAMENTALS", classes="panel--title")
-                yield FundamentalsPanel(id="fund-panel")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.query_one(MarketStatusWidget).is_open = _is_xpar_open()
-        self.set_interval(_config.refresh_interval, self._background_refresh)
-        self.run_worker(self._load_watchlist(), exclusive=True, group="watchlist")
-
-    async def _load_watchlist(self) -> None:
-        """Load watchlist tickers and fetch current prices."""
-        from lens.data.yahoo import get_quote
-        import httpx
-
-        rows = store.get_watchlist_tickers(_config.default_watchlist)
-        if not rows:
+    def _on_ticker_selected(self, data: dict, open_chart: bool = False) -> None:
+        ticker = data.get("ticker", "")
+        if not ticker:
             return
+        self._selected_ticker = ticker
+        self._selected_row = data
 
-        price_data = []
-        async with httpx.AsyncClient(timeout=_config.http_timeout) as client:
-            for row in rows:
-                try:
-                    q = await get_quote(row["ticker"], client=client)
-                    price_data.append({
-                        "ticker": row["ticker"],
-                        "name": row["name"],
-                        "price": q.get("price"),
-                        "change": q.get("change"),
-                        "change_pct": q.get("change_pct"),
-                        "volume": q.get("volume"),
-                        **q,
-                    })
-                except Exception:
-                    price_data.append({
-                        "ticker": row["ticker"],
-                        "name": row["name"],
-                        "price": None,
-                        "change": None,
-                        "change_pct": None,
-                        "volume": None,
-                    })
-
-        watchlist = self.query_one("#watchlist", WatchlistTable)
-        watchlist.update_rows(price_data)
-
-        # Auto-select first ticker
-        if price_data:
-            first = price_data[0]
-            await self._load_ticker_details(first["ticker"], first)
-
-    async def _load_ticker_details(
-        self, ticker: str, quote_data: Optional[dict[str, Any]] = None
-    ) -> None:
-        """Load chart data and fundamentals for a selected ticker."""
-        from lens.data.yahoo import get_chart, get_quote
-
-        # Load price history for sparkline
-        try:
-            chart = store.get_prices(
-                ticker,
-                from_date=None,
-                to_date=None,
-            )
-            if chart.empty:
-                from lens.data.yahoo import get_chart as yf_chart
-                raw = await yf_chart(ticker, interval="1d", range_="1mo")
-                prices = [r["close"] for r in raw if r.get("close")]
-            else:
-                prices = list(chart["close"].tail(30))
-        except Exception:
-            prices = []
-
-        quote = quote_data or {}
-        if not quote.get("price"):
-            try:
-                from lens.data.yahoo import get_quote
-                quote = await get_quote(ticker)
-            except Exception:
-                pass
-
-        chart_panel = self.query_one("#chart-panel", ChartPanel)
-        chart_panel.update_chart(ticker, prices, quote)
+        # Load chart (30 days)
+        self._load_chart(ticker)
 
         # Load fundamentals
+        self._load_fundamentals(ticker, data)
+
+        if open_chart:
+            # Signal main window to open chart screen
+            mw = self.window()
+            if hasattr(mw, "open_quote"):
+                mw.open_quote(ticker)
+
+    def _load_chart(self, ticker: str) -> None:
+        from lens.ui.workers import FetchChartWorker
+
+        if self._chart_worker and self._chart_worker.isRunning():
+            self._chart_worker.quit()
+
+        self._chart.hide()
+        self._chart_label.show()
+        self._chart_label.setText(f"Loading chart for {ticker}…")
+
+        self._chart_worker = FetchChartWorker(ticker, "1d", "1mo", self)
+        self._chart_worker.result.connect(self._on_chart_result)
+        self._chart_worker.error.connect(lambda e: self._chart_label.setText(f"Chart unavailable: {e[:60]}"))
+        self._chart_worker.start()
+
+    def _on_chart_result(self, data: list) -> None:
+        if data:
+            self._chart.load_data(data)
+            self._chart.show()
+            self._chart_label.hide()
+        else:
+            self._chart_label.setText("No chart data")
+
+    def _load_fundamentals(self, ticker: str, quote_data: dict) -> None:
+        from lens.db.store import get_latest_fundamentals
+        from lens.ui.workers import FetchFundamentalsWorker
+
+        # Try DB first
+        fund_row = get_latest_fundamentals(ticker)
+        fund = dict(fund_row) if fund_row else None
+
+        name = quote_data.get("name", ticker)
+        self._stats_panel.update_security(name, fund, quote_data)
+
+        # Fetch fresh fundamentals in background if stale
+        if self._fund_worker and self._fund_worker.isRunning():
+            return
+        self._fund_worker = FetchFundamentalsWorker(ticker, self)
+        self._fund_worker.result.connect(
+            lambda f: self._stats_panel.update_security(name, f, quote_data)
+        )
+        self._fund_worker.start()
+
+    def _on_remove_ticker(self, ticker: str) -> None:
+        from lens.db.store import remove_from_watchlist
+        from lens.config import Config
+        cfg = Config()
         try:
-            fund = store.get_latest_fundamentals(ticker)
-        except Exception:
-            fund = None
+            remove_from_watchlist(cfg.default_watchlist, ticker)
+            self._refresh_watchlist()
+        except Exception as e:
+            pass  # silently ignore
 
-        fund_panel = self.query_one("#fund-panel", FundamentalsPanel)
-        fund_panel.update_fundamentals(ticker, fund)
-
-    def on_dashboard_screen_ticker_selected(self, event: TickerSelected) -> None:
-        if event.ticker:
-            self.run_worker(
-                self._load_ticker_details(event.ticker),
-                exclusive=True,
-                group="ticker_detail",
-            )
-
-    def on_watchlist_table_ticker_selected(self, event: WatchlistTable.TickerSelected) -> None:
-        if event.ticker:
-            self.run_worker(
-                self._load_ticker_details(event.ticker),
-                exclusive=True,
-                group="ticker_detail",
-            )
-
-    def _background_refresh(self) -> None:
-        self.query_one(MarketStatusWidget).is_open = _is_xpar_open()
-        self.run_worker(self._load_watchlist(), exclusive=True, group="watchlist")
-
-    def action_refresh_data(self) -> None:
-        self.run_worker(self._load_watchlist(), exclusive=True, group="watchlist")
-
-    DEFAULT_CSS = """
-    #top-bar {
-        height: 1;
-        background: #0a0a0a;
-        border-bottom: solid #222222;
-        padding: 0 1;
-    }
-    #clock {
-        width: auto;
-        color: #f59e0b;
-        margin-right: 2;
-    }
-    #market-status {
-        width: auto;
-        margin-right: 2;
-    }
-    #app-label {
-        dock: right;
-        width: auto;
-        color: #666666;
-    }
-    #main-area {
-        height: 1fr;
-    }
-    #left-panel {
-        width: 30%;
-        border-right: solid #222222;
-    }
-    #center-panel {
-        width: 50%;
-        border-right: solid #222222;
-    }
-    #right-panel {
-        width: 20%;
-    }
-    .panel--title {
-        color: #f59e0b;
-        text-style: bold;
-        background: #111111;
-        padding: 0 1;
-        border-bottom: solid #222222;
-        height: 1;
-    }
-    #watchlist {
-        height: 1fr;
-    }
-    #chart-panel {
-        height: 1fr;
-        padding: 1;
-    }
-    #fund-panel {
-        height: 1fr;
-        padding: 1;
-    }
-    #chart-hint {
-        margin-bottom: 1;
-    }
-    #dashboard-spark {
-        margin: 1 0;
-        height: 1;
-    }
-    """
+    def _on_error(self, msg: str) -> None:
+        self._watchlist_panel.set_loading(False)
