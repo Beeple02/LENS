@@ -2,274 +2,188 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
-from rich.text import Text
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
-from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, Label, Static
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
-from lens.config import Config
+from lens.ui.widgets.chart_widget import ChartWidget
 
-_config = Config()
-
-_INTERVALS = [
-    ("1d", "5m", "1d"),
-    ("1wk", "1h", "5d"),
-    ("1mo", "1d", "1mo"),
-    ("3mo", "1d", "3mo"),
-    ("1y", "1d", "1y"),
-    ("5y", "1wk", "5y"),
+INTERVALS = [
+    ("1D",  "5m",  "1d"),
+    ("1W",  "1h",  "5d"),
+    ("1M",  "1d",  "1mo"),
+    ("3M",  "1d",  "3mo"),
+    ("1Y",  "1d",  "1y"),
+    ("5Y",  "1wk", "5y"),
+    ("MAX", "1wk", "max"),
 ]
 
-_INTERVAL_LABELS = [iv[0] for iv in _INTERVALS]
+CHART_TYPES = ["Candles", "Line", "Area"]
+SMA_PERIODS = [20, 50, 200]
 
 
-class ChartDisplay(Static):
-    """Renders a price chart using plotext."""
+class ChartScreen(QWidget):
+    def __init__(self, config: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._ticker: Optional[str] = None
+        self._current_interval = INTERVALS[4]  # default 1Y
+        self._worker = None
+        self._mode = "candles"
 
-    def compose(self) -> ComposeResult:
-        yield Label("", id="chart-output")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    def render_chart(
-        self,
-        prices: list[float],
-        dates: list[str],
-        volumes: Optional[list[float]],
-        ticker: str,
-        interval_label: str,
-        sma_20: Optional[list[float]] = None,
-        sma_50: Optional[list[float]] = None,
-        show_volume: bool = False,
-    ) -> None:
-        lbl = self.query_one("#chart-output", Label)
+        # Toolbar
+        toolbar = QFrame()
+        toolbar.setProperty("class", "panel")
+        toolbar.setFixedHeight(48)
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(12, 6, 12, 6)
+        tb_layout.setSpacing(8)
 
-        if not prices:
-            lbl.update(Text("No data available", style="#666666"))
-            return
+        # Ticker input
+        self._ticker_input = QLineEdit()
+        self._ticker_input.setPlaceholderText("Ticker (e.g. MC.PA)")
+        self._ticker_input.setFixedWidth(140)
+        self._ticker_input.returnPressed.connect(self._on_ticker_enter)
+        tb_layout.addWidget(self._ticker_input)
 
-        try:
-            import plotext as plt
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep1)
 
-            plt.clf()
-            plt.theme("dark")
-            plt.canvas_color("black")
-            plt.axes_color("black")
-            plt.ticks_color("gray")
+        # Interval buttons
+        self._iv_btns: list[QPushButton] = []
+        for iv_label, *_ in INTERVALS:
+            btn = QPushButton(iv_label)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, lbl=iv_label: self._set_interval(lbl))
+            tb_layout.addWidget(btn)
+            self._iv_btns.append(btn)
+        self._iv_btns[4].setChecked(True)  # 1Y
 
-            plt.title(f"{ticker} — {interval_label}")
-            plt.ylabel("Price")
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep2)
 
-            x = list(range(len(prices)))
+        # Chart type
+        self._type_btns: list[QPushButton] = []
+        for ct in CHART_TYPES:
+            btn = QPushButton(ct)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, m=ct.lower(): self._set_mode(m))
+            tb_layout.addWidget(btn)
+            self._type_btns.append(btn)
+        self._type_btns[0].setChecked(True)  # Candles
 
-            if show_volume and volumes:
-                plt.subplots(2, 1)
-                plt.subplot(1, 1)
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.VLine)
+        sep3.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep3)
 
-            plt.plot(x, prices, color="orange", label="Price")
-
-            if sma_20:
-                plt.plot(x[-len(sma_20):], sma_20, color="white", label="SMA20")
-            if sma_50:
-                plt.plot(x[-len(sma_50):], sma_50, color="cyan", label="SMA50")
-
-            # X-axis labels: show some dates
-            if dates:
-                step = max(1, len(dates) // 8)
-                tick_xs = list(range(0, len(dates), step))
-                tick_labels = [dates[i][:10] for i in tick_xs]
-                plt.xticks(tick_xs, tick_labels)
-
-            if show_volume and volumes:
-                plt.subplot(2, 1)
-                plt.bar(x, volumes, color="gray", label="Volume")
-                plt.ylabel("Volume")
-
-            chart_str = plt.build()
-            lbl.update(Text.from_ansi(chart_str))
-
-        except ImportError:
-            # Fallback: simple ASCII sparkline
-            from lens.ui.widgets import _sparkline
-            spark = _sparkline(prices, width=min(len(prices), 80))
-            lbl.update(
-                Text(f"\n  {ticker}  {interval_label}\n\n  ", style="#666666") +
-                spark +
-                Text(f"\n\n  {len(prices)} data points", style="#666666")
+        # SMA toggles
+        self._sma_btns: list[QPushButton] = []
+        for period in SMA_PERIODS:
+            btn = QPushButton(f"SMA{period}")
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(
+                lambda checked, p=period: self._chart.toggle_sma(p, checked)
             )
-        except Exception as e:
-            lbl.update(Text(f"Chart error: {e}", style="#ef4444"))
+            tb_layout.addWidget(btn)
+            self._sma_btns.append(btn)
 
+        tb_layout.addStretch()
 
-class ChartScreen(Screen):
-    """Full-screen price chart."""
+        self._ticker_label = QLabel()
+        self._ticker_label.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            "color: #f59e0b; font-size: 13px; font-weight: 700;"
+        )
+        tb_layout.addWidget(self._ticker_label)
 
-    BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("1", "set_interval('1d')", "1D"),
-        Binding("2", "set_interval('1wk')", "1W"),
-        Binding("3", "set_interval('1mo')", "1M"),
-        Binding("4", "set_interval('3mo')", "3M"),
-        Binding("5", "set_interval('1y')", "1Y"),
-        Binding("6", "set_interval('5y')", "5Y"),
-        Binding("v", "toggle_volume", "Volume"),
-        Binding("m", "toggle_sma", "SMA"),
-    ]
+        layout.addWidget(toolbar)
 
-    current_interval: reactive[str] = reactive("1mo")
-    show_volume: reactive[bool] = reactive(False)
-    show_sma: reactive[bool] = reactive(False)
+        # Chart
+        self._chart = ChartWidget()
+        self._chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._chart)
 
-    def __init__(self, ticker: Optional[str] = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._ticker = ticker
+        self._placeholder = QLabel("Enter a ticker above to load a chart")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("color: #444444; font-size: 14px;")
+        layout.addWidget(self._placeholder)
+        self._placeholder.hide()
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="chart-controls"):
-            yield Input(
-                value=self._ticker or "",
-                placeholder="Ticker (e.g. MC.PA)",
-                id="chart-ticker-input",
-            )
-            yield Label("", id="chart-interval-bar")
-            yield Label("", id="chart-options")
-        yield ChartDisplay(id="chart-display")
-        yield Footer()
+    def on_show(self) -> None:
+        self._ticker_input.setFocus()
 
-    def on_mount(self) -> None:
-        self._update_interval_bar()
-        self._update_options_label()
-        if self._ticker:
-            self.run_worker(self._load(), exclusive=True, group="chart")
+    def load_ticker(self, ticker: str) -> None:
+        self._ticker = ticker.upper()
+        self._ticker_input.setText(self._ticker)
+        self._ticker_label.setText(self._ticker)
+        self._fetch_chart()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        ticker = event.value.strip().upper()
+    def _on_ticker_enter(self) -> None:
+        ticker = self._ticker_input.text().strip().upper()
         if ticker:
-            self._ticker = ticker
-            self.run_worker(self._load(), exclusive=True, group="chart")
+            self.load_ticker(ticker)
 
-    def watch_current_interval(self, _: str) -> None:
-        self._update_interval_bar()
-        if self._ticker:
-            self.run_worker(self._load(), exclusive=True, group="chart")
+    def _set_interval(self, label: str) -> None:
+        iv = next((i for i in INTERVALS if i[0] == label), None)
+        if iv:
+            self._current_interval = iv
+            for i, (lbl, *_) in enumerate(INTERVALS):
+                self._iv_btns[i].setChecked(lbl == label)
+            if self._ticker:
+                self._fetch_chart()
 
-    def watch_show_volume(self, _: bool) -> None:
-        self._update_options_label()
-        if self._ticker:
-            self.run_worker(self._load(), exclusive=True, group="chart")
+    def _set_mode(self, mode: str) -> None:
+        self._mode = mode
+        self._chart.set_mode(mode)
+        modes = [ct.lower() for ct in CHART_TYPES]
+        for i, m in enumerate(modes):
+            self._type_btns[i].setChecked(m == mode)
 
-    def watch_show_sma(self, _: bool) -> None:
-        self._update_options_label()
-        if self._ticker:
-            self.run_worker(self._load(), exclusive=True, group="chart")
-
-    def _update_interval_bar(self) -> None:
-        lbl = self.query_one("#chart-interval-bar", Label)
-        parts = Text()
-        for label in _INTERVAL_LABELS:
-            if label == self.current_interval:
-                parts.append(f" [{label}] ", style="#f59e0b bold")
-            else:
-                parts.append(f"  {label}  ", style="#666666")
-        lbl.update(parts)
-
-    def _update_options_label(self) -> None:
-        lbl = self.query_one("#chart-options", Label)
-        parts = Text()
-        parts.append("Vol:", style="#666666")
-        parts.append("[ON]" if self.show_volume else "off", style="#22c55e" if self.show_volume else "#666666")
-        parts.append("  SMA:", style="#666666")
-        parts.append("[ON]" if self.show_sma else "off", style="#22c55e" if self.show_sma else "#666666")
-        lbl.update(parts)
-
-    def _compute_sma(self, prices: list[float], window: int) -> Optional[list[float]]:
-        if len(prices) < window:
-            return None
-        return [
-            sum(prices[i - window:i]) / window
-            for i in range(window, len(prices) + 1)
-        ]
-
-    async def _load(self) -> None:
+    def _fetch_chart(self) -> None:
         if not self._ticker:
             return
 
-        from lens.data.yahoo import get_chart
+        from lens.ui.workers import FetchChartWorker
 
-        # Find matching interval config
-        iv_config = next(
-            (iv for iv in _INTERVALS if iv[0] == self.current_interval),
-            ("1mo", "1d", "1mo"),
-        )
-        _, yf_interval, yf_range = iv_config
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
 
-        try:
-            data = await get_chart(self._ticker, interval=yf_interval, range_=yf_range)
-        except Exception as e:
-            display = self.query_one("#chart-display", ChartDisplay)
-            lbl = display.query_one("#chart-output", Label)
-            lbl.update(Text(f"Error fetching data: {e}", style="#ef4444"))
-            return
+        _, yf_interval, yf_range = self._current_interval
+        self._worker = FetchChartWorker(self._ticker, yf_interval, yf_range, self)
+        self._worker.result.connect(self._on_chart_result)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
 
-        prices = [r["close"] for r in data if r.get("close")]
-        dates = [r["date"] for r in data if r.get("close")]
-        volumes = [r.get("volume") or 0 for r in data if r.get("close")]
+    def _on_chart_result(self, data: list) -> None:
+        if data:
+            self._chart.load_data(data)
+            self._chart.set_mode(self._mode)
+        else:
+            self._placeholder.setText(f"No chart data for {self._ticker}")
+            self._placeholder.show()
 
-        sma_20 = self._compute_sma(prices, 20) if self.show_sma else None
-        sma_50 = self._compute_sma(prices, 50) if self.show_sma else None
-
-        display = self.query_one("#chart-display", ChartDisplay)
-        display.render_chart(
-            prices=prices,
-            dates=dates,
-            volumes=volumes if self.show_volume else None,
-            ticker=self._ticker,
-            interval_label=self.current_interval,
-            sma_20=sma_20,
-            sma_50=sma_50,
-            show_volume=self.show_volume,
-        )
-
-    def action_set_interval(self, interval: str) -> None:
-        self.current_interval = interval
-
-    def action_refresh(self) -> None:
-        if self._ticker:
-            self.run_worker(self._load(), exclusive=True, group="chart")
-
-    def action_toggle_volume(self) -> None:
-        self.show_volume = not self.show_volume
-
-    def action_toggle_sma(self) -> None:
-        self.show_sma = not self.show_sma
-
-    DEFAULT_CSS = """
-    #chart-controls {
-        height: 3;
-        padding: 0 1;
-        background: #0a0a0a;
-        border-bottom: solid #222222;
-        align: left middle;
-    }
-    #chart-ticker-input {
-        width: 20;
-        margin-right: 2;
-    }
-    #chart-interval-bar {
-        width: auto;
-        margin-right: 2;
-    }
-    #chart-options {
-        width: auto;
-        dock: right;
-    }
-    #chart-display {
-        height: 1fr;
-        padding: 1;
-    }
-    """
+    def _on_error(self, msg: str) -> None:
+        self._placeholder.setText(f"Error loading chart: {msg[:80]}")
+        self._placeholder.show()

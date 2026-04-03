@@ -1,1 +1,1 @@
-"""TUI layer for LENS."""
+"""LENS Qt UI layer."""

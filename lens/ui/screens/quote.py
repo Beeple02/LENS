@@ -1,346 +1,388 @@
-"""Quote screen — full-screen deep dive for a single security."""
+"""Quote screen — full deep-dive for a single security."""
 
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from rich.text import Text
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.reactive import reactive
-from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Static
-
-from lens.config import Config
-from lens.db import store
-from lens.ui.widgets import (
-    PriceWidget,
-    SparklineWidget,
-    fmt_change,
-    fmt_large,
-    fmt_number,
-    fmt_pct,
-    staleness_indicator,
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
-_config = Config()
+from lens.ui.widgets.chart_widget import ChartWidget
+from lens.ui.widgets.data_table import COLOR_DIM, COLOR_TEXT, _large_num
+from lens.ui.widgets.stat_card import StatCard
 
-_INTERVALS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "5y"]
+INTERVALS = [
+    ("1D",  "5m",  "1d"),
+    ("1W",  "1h",  "5d"),
+    ("1M",  "1d",  "1mo"),
+    ("3M",  "1d",  "3mo"),
+    ("1Y",  "1d",  "1y"),
+    ("5Y",  "1wk", "5y"),
+]
+
+FUND_SECTIONS = [
+    ("Valuation",   [("P/E", "pe_ratio"), ("Fwd P/E", "forward_pe"),
+                     ("P/B", "pb_ratio"), ("P/S", "ps_ratio"), ("EV/EBITDA", "ev_ebitda")]),
+    ("Profitability",[("ROE", "roe", "pct_mult"), ("ROA", "roa", "pct_mult"),
+                     ("EBITDA", "ebitda", "large"), ("Net Income", "net_income", "large")]),
+    ("Growth",      [("Rev Growth", "revenue_growth", "pct_mult"),
+                     ("EPS Growth", "earnings_growth", "pct_mult")]),
+    ("Health",      [("Debt/Equity", "debt_to_equity"), ("Current Ratio", "current_ratio")]),
+    ("Dividends",   [("Div Yield", "dividend_yield", "pct_mult"),
+                     ("Payout Ratio", "payout_ratio", "pct_mult")]),
+]
 
 
-class QuoteHeader(Static):
-    """Security identification header."""
+def _fmt_fund(v, mode=None, decimals=2):
+    if v is None:
+        return "—"
+    if mode == "pct_mult":
+        return f"{v * 100:.2f}%"
+    if mode == "large":
+        return _large_num(v)
+    return f"{v:,.{decimals}f}"
 
-    def compose(self) -> ComposeResult:
-        yield Label("", id="q-name")
-        yield Label("", id="q-meta")
 
-    def update_security(self, sec: dict[str, Any]) -> None:
-        name_lbl = self.query_one("#q-name", Label)
-        name_lbl.update(
-            Text(sec.get("name", ""), style="#e8e8e8 bold") +
-            Text(f"  {sec.get('ticker', '')}", style="#f59e0b bold") +
-            Text(f"  {sec.get('isin', '')}", style="#666666") +
-            Text(f"  {sec.get('mic', '')}", style="#666666")
+class QuoteHeader(QFrame):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "panel")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(0)
+
+        self._name  = QLabel()
+        self._name.setStyleSheet("font-size: 16px; font-weight: 700; color: #e8e8e8;")
+        self._ticker = QLabel()
+        self._ticker.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            "font-size: 14px; font-weight: 700; color: #f59e0b; margin-left: 12px;"
         )
-        meta_lbl = self.query_one("#q-meta", Label)
-        meta_lbl.update(
-            Text(sec.get("sector", ""), style="#666666") +
-            Text(" · ", style="#333333") +
-            Text(sec.get("industry", ""), style="#666666") +
-            Text(f"  {sec.get('currency', 'EUR')}", style="#94a3b8")
+        self._isin = QLabel()
+        self._isin.setStyleSheet("font-size: 11px; color: #555555; margin-left: 16px;")
+        self._meta = QLabel()
+        self._meta.setStyleSheet("font-size: 11px; color: #555555; margin-left: 16px;")
+
+        layout.addWidget(self._name)
+        layout.addWidget(self._ticker)
+        layout.addWidget(self._isin)
+        layout.addWidget(self._meta)
+        layout.addStretch()
+
+    def update(self, sec: dict) -> None:
+        self._name.setText(sec.get("name", ""))
+        self._ticker.setText(sec.get("ticker", ""))
+        isin = sec.get("isin", "")
+        self._isin.setText(isin or "")
+        self._isin.setVisible(bool(isin))
+        parts = [sec.get("mic", ""), sec.get("currency", ""), sec.get("sector", "")]
+        self._meta.setText("  ·  ".join(p for p in parts if p))
+
+
+class PricePanel(QFrame):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "panel")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
+
+        # Large price + change
+        row1 = QHBoxLayout()
+        self._price = QLabel("—")
+        self._price.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            "font-size: 32px; font-weight: 700; color: #e8e8e8;"
+        )
+        self._change = QLabel()
+        self._change.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            "font-size: 16px; margin-left: 12px; margin-top: 14px;"
+        )
+        self._source = QLabel()
+        self._source.setStyleSheet("font-size: 10px; color: #333333; margin-left: 8px; margin-top: 18px;")
+        row1.addWidget(self._price)
+        row1.addWidget(self._change)
+        row1.addWidget(self._source)
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # Detail row
+        self._detail = QLabel()
+        self._detail.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            "font-size: 11px; color: #666666;"
+        )
+        layout.addWidget(self._detail)
+
+    def update_quote(self, quote: dict) -> None:
+        price = quote.get("price")
+        change = quote.get("change")
+        change_pct = quote.get("change_pct")
+        color = "#22c55e" if (change and change > 0) else ("#ef4444" if (change and change < 0) else "#e8e8e8")
+
+        self._price.setText(f"{price:,.2f}" if price else "—")
+        self._price.setStyleSheet(
+            'font-family: "JetBrains Mono", Consolas, monospace; '
+            f"font-size: 32px; font-weight: 700; color: {color};"
         )
 
-
-class PricePanel(Static):
-    """Live price panel with bid/ask and day stats."""
-
-    def compose(self) -> ComposeResult:
-        yield PriceWidget(id="q-price")
-        yield Label("", id="q-price-detail")
-        yield Label("", id="q-source")
-
-    def update_quote(self, quote: dict[str, Any]) -> None:
-        pw = self.query_one("#q-price", PriceWidget)
-        pw.price = quote.get("price")
-        pw.change = quote.get("change")
-        pw.change_pct = quote.get("change_pct")
-
-        detail = self.query_one("#q-price-detail", Label)
-        parts = Text()
-
-        def kv(k: str, v: str, sep: str = "  ") -> None:
-            parts.append(f"{k} ", style="#666666")
-            parts.append(f"{v}{sep}", style="#e8e8e8")
-
-        kv("Open", fmt_number(quote.get("open")))
-        kv("High", fmt_number(quote.get("high")))
-        kv("Low", fmt_number(quote.get("low")))
-        kv("Vol", fmt_large(quote.get("volume"), currency="").strip())
-        kv("Prev", fmt_number(quote.get("prev_close")))
-        if quote.get("bid") and quote.get("ask"):
-            spread = quote["ask"] - quote["bid"]
-            kv("Bid", fmt_number(quote.get("bid")))
-            kv("Ask", fmt_number(quote.get("ask")))
-            kv("Spread", f"{spread:.4f}", sep="")
-
-        detail.update(parts)
-
-        source_lbl = self.query_one("#q-source", Label)
-        src = quote.get("source", "yahoo")
-        source_lbl.update(Text(f"Source: {src}", style="#333333"))
-
-
-class ChartPanel(Static):
-    """Price chart panel using sparkline."""
-
-    def compose(self) -> ComposeResult:
-        yield Label("", id="q-chart-intervals")
-        yield SparklineWidget(id="q-spark", width=80)
-        yield Label("", id="q-chart-52w")
-
-    def update_chart(self, prices: list[float], interval: str, quote: dict[str, Any]) -> None:
-        interval_lbl = self.query_one("#q-chart-intervals", Label)
-        parts = Text()
-        for iv in _INTERVALS:
-            if iv == interval:
-                parts.append(f" [{iv}] ", style="#f59e0b bold")
-            else:
-                parts.append(f"  {iv}  ", style="#666666")
-        interval_lbl.update(parts)
-
-        spark = self.query_one("#q-spark", SparklineWidget)
-        spark.values = prices
-        spark._spark_width = 80
-
-        lbl_52w = self.query_one("#q-chart-52w", Label)
-        low_52 = quote.get("day_low_52w")
-        high_52 = quote.get("day_high_52w")
-        if low_52 and high_52:
-            lbl_52w.update(
-                Text(f"52w  ", style="#666666") +
-                Text(f"{low_52:,.2f}", style="#ef4444") +
-                Text(" ── ", style="#333333") +
-                Text(f"{high_52:,.2f}", style="#22c55e")
+        if change is not None:
+            sign = "+" if change > 0 else ""
+            pct_str = f"  ({sign}{change_pct:.2f}%)" if change_pct else ""
+            self._change.setText(f"{sign}{change:,.2f}{pct_str}")
+            self._change.setStyleSheet(
+                'font-family: "JetBrains Mono", Consolas, monospace; '
+                f"font-size: 16px; margin-left: 12px; margin-top: 14px; color: {color};"
             )
 
+        src = quote.get("source", "yahoo")
+        self._source.setText(f"via {src}")
 
-class FundamentalsTable(Static):
-    """Full fundamentals table."""
+        parts = []
+        for k, v in [("O", "open"), ("H", "high"), ("L", "low"), ("Prev", "prev_close")]:
+            val = quote.get(v)
+            if val is not None:
+                parts.append(f"{k} {val:,.2f}")
+        if quote.get("bid") and quote.get("ask"):
+            parts.append(f"Bid {quote['bid']:,.2f}")
+            parts.append(f"Ask {quote['ask']:,.2f}")
+        vol = quote.get("volume")
+        if vol:
+            parts.append(f"Vol {_large_num(vol, currency='').strip()}")
+        self._detail.setText("   ·   ".join(parts))
 
-    def compose(self) -> ComposeResult:
-        yield DataTable(id="q-fund-table", show_header=False)
 
-    def on_mount(self) -> None:
-        table = self.query_one("#q-fund-table", DataTable)
-        table.add_columns("Metric", "Value", "Metric", "Value")
+class FundamentalsSection(QFrame):
+    """A titled group of stat cards."""
 
-    def update_fundamentals(self, fund: Optional[Any]) -> None:
-        table = self.query_one("#q-fund-table", DataTable)
-        table.clear()
+    def __init__(self, title: str, fields: list, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
 
-        if fund is None:
-            table.add_row("No fundamental data available", "", "", "")
+        hdr = QLabel(title.upper())
+        hdr.setProperty("class", "section-header")
+        hdr.setContentsMargins(0, 8, 0, 4)
+        layout.addWidget(hdr)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self._cards: dict[str, StatCard] = {}
+        for field_def in fields:
+            key = field_def[0]
+            card = StatCard(key)
+            self._cards[key] = card
+            row.addWidget(card)
+        layout.addLayout(row)
+
+        self._fields = fields
+
+    def update_data(self, fund: dict) -> None:
+        for field_def in self._fields:
+            key = field_def[0]
+            col = field_def[1]
+            mode = field_def[2] if len(field_def) > 2 else None
+            card = self._cards.get(key)
+            if card:
+                card.set_value(_fmt_fund(fund.get(col), mode))
+
+
+class QuoteScreen(QWidget):
+    """Full-screen quote deep-dive."""
+
+    def __init__(self, config: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._ticker: Optional[str] = None
+        self._current_interval = ("1M", "1d", "1mo")
+        self._workers: list = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header
+        self._header = QuoteHeader()
+        layout.addWidget(self._header)
+
+        # Top row: price + interval bar
+        top_row = QFrame()
+        top_row.setProperty("class", "panel")
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+
+        self._price_panel = PricePanel()
+        self._price_panel.setFixedWidth(500)
+        top_layout.addWidget(self._price_panel)
+
+        # Interval controls
+        iv_frame = QFrame()
+        iv_frame.setProperty("class", "panel")
+        iv_layout = QHBoxLayout(iv_frame)
+        iv_layout.setContentsMargins(12, 0, 12, 0)
+        iv_layout.setSpacing(4)
+
+        self._iv_buttons: list[QPushButton] = []
+        self._btn_group: list = []
+        for iv_label, *_ in INTERVALS:
+            btn = QPushButton(iv_label)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, lbl=iv_label: self._set_interval(lbl))
+            iv_layout.addWidget(btn)
+            self._iv_buttons.append(btn)
+
+        iv_layout.addSpacing(16)
+
+        # Candles / Line toggle
+        for label in ("Candles", "Line"):
+            btn = QPushButton(label)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, m=label.lower(): self._set_mode(m))
+            iv_layout.addWidget(btn)
+            self._iv_buttons.append(btn)
+
+        iv_layout.addSpacing(16)
+
+        # SMA toggles
+        for period in (20, 50, 200):
+            btn = QPushButton(f"SMA{period}")
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(
+                lambda checked, p=period: self._chart.toggle_sma(p, checked)
+            )
+            iv_layout.addWidget(btn)
+
+        iv_layout.addStretch()
+        top_layout.addWidget(iv_frame)
+        layout.addWidget(top_row)
+
+        # Mark default interval
+        self._iv_buttons[2].setChecked(True)  # 1M
+        self._iv_buttons[len(INTERVALS)].setChecked(True)  # Candles
+
+        # Chart
+        self._chart = ChartWidget()
+        self._chart.setMinimumHeight(300)
+        self._chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._chart)
+
+        # Fundamentals scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedHeight(200)
+
+        fund_widget = QWidget()
+        fund_layout = QHBoxLayout(fund_widget)
+        fund_layout.setContentsMargins(12, 8, 12, 8)
+        fund_layout.setSpacing(16)
+
+        self._fund_sections: list[FundamentalsSection] = []
+        for section_title, fields in FUND_SECTIONS:
+            section = FundamentalsSection(section_title, fields)
+            fund_layout.addWidget(section)
+            self._fund_sections.append(section)
+
+        fund_layout.addStretch()
+        scroll.setWidget(fund_widget)
+        layout.addWidget(scroll)
+
+        self._loading_label = QLabel("Enter a ticker to load a quote")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("color: #555555; font-size: 14px;")
+
+    def load_ticker(self, ticker: str) -> None:
+        self._ticker = ticker.upper()
+        self._load_all()
+
+    def on_show(self) -> None:
+        pass  # Quote screen waits for explicit load_ticker call
+
+    def _load_all(self) -> None:
+        if not self._ticker:
             return
 
-        rows = [
-            ("P/E Ratio", fmt_number(fund["pe_ratio"], decimals=1), "Fwd P/E", fmt_number(fund["forward_pe"], decimals=1)),
-            ("P/B Ratio", fmt_number(fund["pb_ratio"], decimals=2), "P/S Ratio", fmt_number(fund["ps_ratio"], decimals=2)),
-            ("EV/EBITDA", fmt_number(fund["ev_ebitda"], decimals=1), "Market Cap", fmt_large(fund["market_cap"])),
-            ("Div Yield", fmt_pct(fund["dividend_yield"], multiply=True), "Payout Ratio", fmt_pct(fund["payout_ratio"], multiply=True)),
-            ("ROE", fmt_pct(fund["roe"], multiply=True), "ROA", fmt_pct(fund["roa"], multiply=True)),
-            ("Revenue TTM", fmt_large(fund["revenue_ttm"]), "EBITDA", fmt_large(fund["ebitda"])),
-            ("Net Income", fmt_large(fund["net_income"]), "Ent. Value", fmt_large(fund["enterprise_value"])),
-            ("Debt/Equity", fmt_number(fund["debt_to_equity"], decimals=2), "Current Ratio", fmt_number(fund["current_ratio"], decimals=2)),
-            ("Rev Growth", fmt_pct(fund["revenue_growth"], multiply=True), "EPS Growth", fmt_pct(fund["earnings_growth"], multiply=True)),
-        ]
-
-        for k1, v1, k2, v2 in rows:
-            table.add_row(
-                Text(k1, style="#666666"),
-                Text(v1, style="#e8e8e8"),
-                Text(k2, style="#666666"),
-                Text(v2, style="#e8e8e8"),
-            )
-
-
-class QuoteScreen(Screen):
-    """Full-screen security quote view."""
-
-    BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("1", "set_interval_1d", "1D"),
-        Binding("2", "set_interval_1w", "1W"),
-        Binding("3", "set_interval_1m", "1M"),
-        Binding("4", "set_interval_6m", "6M"),
-        Binding("5", "set_interval_1y", "1Y"),
-        Binding("6", "set_interval_5y", "5Y"),
-    ]
-
-    current_interval: reactive[str] = reactive("1mo")
-
-    def __init__(self, ticker: Optional[str] = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._ticker = ticker
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        with Horizontal(id="q-top-bar"):
-            yield Input(placeholder="Enter ticker (e.g. MC.PA)…", id="q-ticker-input")
-        with Vertical(id="q-content"):
-            yield QuoteHeader(id="q-header", classes="panel")
-            with Horizontal(id="q-middle"):
-                with Vertical(id="q-price-panel", classes="panel"):
-                    yield Label("LIVE PRICE", classes="panel--title")
-                    yield PricePanel(id="price-panel")
-                with Vertical(id="q-chart-panel", classes="panel"):
-                    yield Label("CHART", classes="panel--title")
-                    yield ChartPanel(id="chart-panel")
-            with Vertical(id="q-fundamentals", classes="panel"):
-                yield Label("FUNDAMENTALS", classes="panel--title")
-                yield FundamentalsTable(id="fund-table")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        if self._ticker:
-            self.run_worker(self._load(self._ticker), exclusive=True, group="quote")
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        ticker = event.value.strip().upper()
-        if ticker:
-            self._ticker = ticker
-            self.run_worker(self._load(ticker), exclusive=True, group="quote")
-
-    def watch_current_interval(self, interval: str) -> None:
-        if self._ticker:
-            self.run_worker(self._load(self._ticker), exclusive=True, group="quote")
-
-    async def _load(self, ticker: str) -> None:
-        import httpx
-        from lens.data.euronext import get_live_quote_with_fallback
-        from lens.data.yahoo import get_chart, get_quote
-
-        # Fetch security info from DB
-        sec_row = store.get_security_by_ticker(ticker)
-        sec = dict(sec_row) if sec_row else {"ticker": ticker, "name": ticker}
-
-        hdr = self.query_one("#q-header", QuoteHeader)
-        hdr.update_security(sec)
+        # Load security info from DB
+        from lens.db.store import get_security_by_ticker
+        sec = get_security_by_ticker(self._ticker)
+        sec_data = dict(sec) if sec else {"ticker": self._ticker, "name": self._ticker}
+        self._header.update(sec_data)
 
         # Fetch live quote
-        try:
-            if sec.get("isin") and sec.get("mic"):
-                quote = await get_live_quote_with_fallback(
-                    sec["isin"], sec["mic"], ticker
-                )
-            else:
-                quote = await get_quote(ticker)
-            if not quote.get("name"):
-                quote["name"] = sec.get("name", ticker)
-        except Exception:
-            quote = {"ticker": ticker, "price": None}
+        self._load_quote()
 
-        price_panel = self.query_one("#price-panel", PricePanel)
-        price_panel.update_quote(quote)
+        # Fetch chart
+        self._load_chart()
 
-        # Fetch chart data
-        try:
-            range_map = {
-                "1d": ("5m", "1d"),
-                "5d": ("15m", "5d"),
-                "1mo": ("1d", "1mo"),
-                "3mo": ("1d", "3mo"),
-                "6mo": ("1d", "6mo"),
-                "1y": ("1d", "1y"),
-                "5y": ("1wk", "5y"),
-            }
-            iv, rng = range_map.get(self.current_interval, ("1d", "1y"))
-            chart_data = await get_chart(ticker, interval=iv, range_=rng)
-            prices = [r["close"] for r in chart_data if r.get("close")]
-        except Exception:
-            prices = []
+        # Fetch fundamentals
+        self._load_fundamentals()
 
-        chart_panel = self.query_one("#chart-panel", ChartPanel)
-        chart_panel.update_chart(prices, self.current_interval, quote)
+    def _load_quote(self) -> None:
+        from lens.ui.workers import FetchLiveQuoteWorker
+        from lens.db.store import get_security_by_ticker
+        sec = get_security_by_ticker(self._ticker)
+        isin = sec["isin"] if sec else None
+        mic  = sec["mic"]  if sec else "XPAR"
 
-        # Fundamentals
-        try:
-            fund = store.get_latest_fundamentals(ticker)
-        except Exception:
-            fund = None
+        worker = FetchLiveQuoteWorker(self._ticker, isin, mic, self)
+        worker.result.connect(self._on_quote_result)
+        worker.error.connect(lambda e: self._price_panel._detail.setText(f"Quote error: {e[:80]}"))
+        worker.start()
+        self._workers.append(worker)
 
-        fund_table = self.query_one("#fund-table", FundamentalsTable)
-        fund_table.update_fundamentals(fund)
+    def _on_quote_result(self, quote: dict) -> None:
+        self._price_panel.update_quote(quote)
 
-    def action_refresh(self) -> None:
-        if self._ticker:
-            self.run_worker(self._load(self._ticker), exclusive=True, group="quote")
+    def _load_chart(self) -> None:
+        from lens.ui.workers import FetchChartWorker
+        _, yf_interval, yf_range = self._current_interval
+        worker = FetchChartWorker(self._ticker, yf_interval, yf_range, self)
+        worker.result.connect(self._chart.load_data)
+        worker.error.connect(lambda e: None)
+        worker.start()
+        self._workers.append(worker)
 
-    def action_set_interval_1d(self) -> None:
-        self.current_interval = "1d"
+    def _load_fundamentals(self) -> None:
+        from lens.ui.workers import FetchFundamentalsWorker
+        worker = FetchFundamentalsWorker(self._ticker, self)
+        worker.result.connect(self._on_fund_result)
+        worker.start()
+        self._workers.append(worker)
 
-    def action_set_interval_1w(self) -> None:
-        self.current_interval = "5d"
+    def _on_fund_result(self, fund: dict) -> None:
+        for section in self._fund_sections:
+            section.update_data(fund)
 
-    def action_set_interval_1m(self) -> None:
-        self.current_interval = "1mo"
+    def _set_interval(self, label: str) -> None:
+        iv = next((i for i in INTERVALS if i[0] == label), None)
+        if iv:
+            self._current_interval = iv
+            # Uncheck all interval buttons and check the selected one
+            for i, (lbl, *_) in enumerate(INTERVALS):
+                self._iv_buttons[i].setChecked(lbl == label)
+            self._load_chart()
 
-    def action_set_interval_6m(self) -> None:
-        self.current_interval = "6mo"
-
-    def action_set_interval_1y(self) -> None:
-        self.current_interval = "1y"
-
-    def action_set_interval_5y(self) -> None:
-        self.current_interval = "5y"
-
-    DEFAULT_CSS = """
-    #q-top-bar {
-        height: 3;
-        padding: 0 1;
-        background: #0a0a0a;
-        border-bottom: solid #222222;
-    }
-    #q-ticker-input {
-        width: 30;
-    }
-    #q-content {
-        height: 1fr;
-    }
-    #q-header {
-        height: auto;
-        padding: 1;
-        border-bottom: solid #222222;
-    }
-    #q-middle {
-        height: 12;
-        border-bottom: solid #222222;
-    }
-    #q-price-panel {
-        width: 40%;
-        border-right: solid #222222;
-    }
-    #q-chart-panel {
-        width: 60%;
-    }
-    #q-fundamentals {
-        height: 1fr;
-    }
-    #price-panel, #chart-panel, #fund-table {
-        padding: 1;
-    }
-    .panel--title {
-        color: #f59e0b;
-        text-style: bold;
-        background: #111111;
-        padding: 0 1;
-        border-bottom: solid #222222;
-        height: 1;
-    }
-    #q-spark {
-        height: 3;
-        margin: 1 0;
-    }
-    """
+    def _set_mode(self, mode: str) -> None:
+        self._chart.set_mode(mode)
+        # Update button state
+        modes = ["candles", "line"]
+        for j, m in enumerate(modes):
+            self._iv_buttons[len(INTERVALS) + j].setChecked(m == mode)
