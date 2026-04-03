@@ -241,6 +241,10 @@ class ChartWidget(QWidget):
 
         self._redraw_smas()
 
+        # Force pyqtgraph to fit the view to the new data after each reload
+        self._price_plot.autoRange()
+        self._vol_plot.autoRange()
+
     def _redraw_smas(self) -> None:
         # Remove old SMA lines
         for item in self._sma_items.values():
