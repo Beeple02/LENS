@@ -25,6 +25,13 @@ _HEADERS = {
 _RATE_LIMIT_DELAY = 0.3  # 300ms between requests
 _last_request_time: float = 0.0
 _crumb: Optional[str] = None
+_cached_cookies: dict[str, str] = {}   # cookies that go with the crumb
+
+
+def _invalidate_crumb() -> None:
+    global _crumb, _cached_cookies
+    _crumb = None
+    _cached_cookies = {}
 
 
 async def _throttle() -> None:
@@ -179,19 +186,23 @@ async def get_quote(
 
 
 async def _ensure_crumb(c: httpx.AsyncClient) -> Optional[str]:
-    """Fetch and cache a Yahoo Finance crumb (required for quoteSummary v10)."""
-    global _crumb
+    """Fetch and cache a Yahoo Finance crumb + its associated cookies."""
+    global _crumb, _cached_cookies
     if _crumb:
+        # Re-inject cookies into this client so the crumb is accepted
+        for k, v in _cached_cookies.items():
+            c.cookies.set(k, v, domain=".yahoo.com")
         return _crumb
     try:
-        # Establish a session cookie with Yahoo Finance
         await c.get("https://fc.yahoo.com/", headers=_HEADERS, follow_redirects=True)
+        _cached_cookies = dict(c.cookies)
         r = await c.get(
             "https://query1.finance.yahoo.com/v1/test/getcrumb",
             headers={**_HEADERS, "Accept": "*/*"},
         )
         if r.status_code == 200 and r.text.strip():
             _crumb = r.text.strip()
+            _cached_cookies = dict(c.cookies)
     except Exception:
         pass
     return _crumb
@@ -220,7 +231,18 @@ async def get_fundamentals(
         params: dict[str, Any] = {"modules": modules}
         if crumb:
             params["crumb"] = crumb
-        data = await _get(c, url, params)
+        try:
+            data = await _get(c, url, params)
+        except Exception as exc:
+            # 401 = crumb/cookie expired; invalidate and retry once with fresh crumb
+            if "401" in str(exc):
+                _invalidate_crumb()
+                crumb = await _ensure_crumb(c)
+                if crumb:
+                    params["crumb"] = crumb
+                data = await _get(c, url, params)
+            else:
+                raise
         qs = data.get("quoteSummary", {}).get("result")
         if not qs:
             return {}

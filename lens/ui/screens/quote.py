@@ -88,15 +88,19 @@ class QuoteHeader(QFrame):
         layout.addWidget(self._add_btn)
 
         self._current_ticker: str = ""
+        self._current_name: str = ""
+        self._current_currency: str = "EUR"
 
     def update(self, sec: dict) -> None:
-        self._current_ticker = sec.get("ticker", "")
-        self._name.setText(sec.get("name", ""))
+        self._current_ticker  = sec.get("ticker", "")
+        self._current_name    = sec.get("name", self._current_ticker)
+        self._current_currency = sec.get("currency", "EUR")
+        self._name.setText(self._current_name)
         self._ticker.setText(self._current_ticker)
         isin = sec.get("isin", "")
         self._isin.setText(isin or "")
         self._isin.setVisible(bool(isin))
-        parts = [sec.get("mic", ""), sec.get("currency", ""), sec.get("sector", "")]
+        parts = [sec.get("mic", ""), self._current_currency, sec.get("sector", "")]
         self._meta.setText("  ·  ".join(p for p in parts if p))
         self._add_btn.setEnabled(bool(self._current_ticker))
         self._add_btn.setText("+ WATCHLIST")
@@ -105,10 +109,16 @@ class QuoteHeader(QFrame):
         if not self._current_ticker:
             return
         import logging
-        from lens.db.store import add_to_watchlist, create_watchlist
+        from lens.db.store import add_to_watchlist, create_watchlist, upsert_security
         from lens.config import Config
         wl = Config().default_watchlist
         try:
+            # Ensure security exists in DB before adding FK-constrained watchlist entry
+            upsert_security(
+                ticker=self._current_ticker,
+                name=self._current_name,
+                currency=self._current_currency,
+            )
             create_watchlist(wl)
             add_to_watchlist(wl, self._current_ticker)
             self._add_btn.setText("✓ ADDED")

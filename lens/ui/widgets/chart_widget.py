@@ -244,9 +244,19 @@ class ChartWidget(QWidget):
 
         self._redraw_smas()
 
-        # Force pyqtgraph to fit the view to the new data after each reload
-        self._price_plot.autoRange()
-        self._vol_plot.autoRange()
+        # Explicitly set view ranges — autoRange() doesn't reliably pick up
+        # custom GraphicsObject items like CandlestickItem
+        lows  = np.array([d.get("low")  or d["close"] for d in self._data], dtype=float)
+        highs = np.array([d.get("high") or d["close"] for d in self._data], dtype=float)
+        vols  = np.array([d.get("volume") or 0        for d in self._data], dtype=float)
+
+        y_pad = (highs.max() - lows.min()) * 0.04
+        self._price_plot.setXRange(0, len(self._data) - 1, padding=0.02)
+        self._price_plot.setYRange(lows.min() - y_pad, highs.max() + y_pad, padding=0)
+
+        if self._show_volume and vols.max() > 0:
+            self._vol_plot.setXRange(0, len(self._data) - 1, padding=0.02)
+            self._vol_plot.setYRange(0, vols.max() * 1.15, padding=0)
 
     def _redraw_smas(self) -> None:
         # Remove old SMA lines
