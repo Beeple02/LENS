@@ -24,6 +24,7 @@ _HEADERS = {
 
 _RATE_LIMIT_DELAY = 0.3  # 300ms between requests
 _last_request_time: float = 0.0
+_crumb: Optional[str] = None
 
 
 async def _throttle() -> None:
@@ -177,6 +178,25 @@ async def get_quote(
     return q
 
 
+async def _ensure_crumb(c: httpx.AsyncClient) -> Optional[str]:
+    """Fetch and cache a Yahoo Finance crumb (required for quoteSummary v10)."""
+    global _crumb
+    if _crumb:
+        return _crumb
+    try:
+        # Establish a session cookie with Yahoo Finance
+        await c.get("https://fc.yahoo.com/", headers=_HEADERS, follow_redirects=True)
+        r = await c.get(
+            "https://query1.finance.yahoo.com/v1/test/getcrumb",
+            headers={**_HEADERS, "Accept": "*/*"},
+        )
+        if r.status_code == 200 and r.text.strip():
+            _crumb = r.text.strip()
+    except Exception:
+        pass
+    return _crumb
+
+
 async def get_fundamentals(
     ticker: str,
     client: Optional[httpx.AsyncClient] = None,
@@ -194,9 +214,12 @@ async def get_fundamentals(
         "balanceSheetHistory",
         "cashflowStatementHistory",
     ])
-    params = {"modules": modules}
 
     async def _fetch(c: httpx.AsyncClient) -> dict[str, Any]:
+        crumb = await _ensure_crumb(c)
+        params: dict[str, Any] = {"modules": modules}
+        if crumb:
+            params["crumb"] = crumb
         data = await _get(c, url, params)
         qs = data.get("quoteSummary", {}).get("result")
         if not qs:
