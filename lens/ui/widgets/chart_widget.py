@@ -40,12 +40,13 @@ class CandlestickItem(pg.GraphicsObject):
     def _generate(self) -> None:
         from PyQt6.QtGui import QPainter, QPicture, QPen, QBrush
         from PyQt6.QtCore import QRectF
+        from PyQt6.QtCore import Qt as _Qt
 
         picture = QPicture()
         p = QPainter(picture)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        w = 0.35  # half candle width
+        w = 0.38  # half candle body width
 
         for i, candle in enumerate(self._data):
             o = candle.get("open")
@@ -56,23 +57,25 @@ class CandlestickItem(pg.GraphicsObject):
                 continue
 
             bullish = c >= o
-            body_color = QColor(C_POS if bullish else C_NEG)
-            wick_color = QColor(C_POS if bullish else C_NEG)
+            color = QColor(C_POS if bullish else C_NEG)
 
-            pen = QPen(wick_color, 1)
-            p.setPen(pen)
-            # Wick
-            p.drawLine(
-                pg.Point(i, l),
-                pg.Point(i, h),
-            )
-
-            # Body
-            p.setPen(QPen(body_color, 0))
-            p.setBrush(QBrush(body_color))
             body_top = max(o, c)
             body_bot = min(o, c)
-            body_h = max(body_top - body_bot, 0.0001)
+            body_h   = max(body_top - body_bot, 0.0001)
+
+            # Wick — thin, same color as body
+            p.setPen(QPen(color, 0.8))
+            p.drawLine(pg.Point(i, l), pg.Point(i, body_bot))
+            p.drawLine(pg.Point(i, body_top), pg.Point(i, h))
+
+            # Body — hollow (outline only) for bullish, filled for bearish
+            if bullish:
+                p.setPen(QPen(color, 1.0))
+                p.setBrush(QBrush(_Qt.BrushStyle.NoBrush))
+            else:
+                p.setPen(QPen(color, 0.5))
+                p.setBrush(QBrush(color))
+
             p.drawRect(QRectF(i - w, body_bot, w * 2, body_h))
 
         p.end()

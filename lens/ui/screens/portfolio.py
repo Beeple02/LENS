@@ -243,9 +243,10 @@ class PositionsTab(QWidget):
 
 
 class TransactionsTab(QWidget):
-    def __init__(self, account_name: str, parent=None) -> None:
+    def __init__(self, account_name: str, refresh_callback=None, parent=None) -> None:
         super().__init__(parent)
         self._account = account_name
+        self._refresh_callback = refresh_callback
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -362,8 +363,9 @@ class TransactionsTab(QWidget):
                 fees=vals["fees"],
                 notes=vals["notes"],
             )
-            # Refresh
-            self.parent().parent().load_data()
+            # Refresh portfolio
+            if callable(self._refresh_callback):
+                self._refresh_callback()
         except Exception as e:
             QMessageBox.warning(self, "Error", str(e))
 
@@ -560,7 +562,7 @@ class PortfolioScreen(QWidget):
         self._positions_tab.open_quote_requested = self._open_quote
         self._tabs.addTab(self._positions_tab, "Positions")
 
-        self._tx_tab = TransactionsTab(self._account)
+        self._tx_tab = TransactionsTab(self._account, refresh_callback=self.load_data)
         self._tabs.addTab(self._tx_tab, "Transactions")
 
         self._analytics_tab = AnalyticsTab()
