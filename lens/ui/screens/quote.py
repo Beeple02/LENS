@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -54,6 +54,8 @@ def _fmt_fund(v, mode=None, decimals=2):
 
 
 class QuoteHeader(QFrame):
+    deep_dive_clicked = pyqtSignal(str)  # emits ticker when DEEP DIVE button pressed
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setProperty("class", "panel")
@@ -80,12 +82,20 @@ class QuoteHeader(QFrame):
         self._add_btn.setFixedWidth(100)
         self._add_btn.clicked.connect(self._on_add_watchlist)
 
+        self._deep_dive_btn = QPushButton("DEEP DIVE ↗")
+        self._deep_dive_btn.setProperty("class", "interval-btn")
+        self._deep_dive_btn.setEnabled(False)
+        self._deep_dive_btn.setFixedWidth(110)
+        self._deep_dive_btn.clicked.connect(self._on_deep_dive)
+
         layout.addWidget(self._name)
         layout.addWidget(self._ticker)
         layout.addWidget(self._isin)
         layout.addWidget(self._meta)
         layout.addStretch()
         layout.addWidget(self._add_btn)
+        layout.addSpacing(8)
+        layout.addWidget(self._deep_dive_btn)
 
         self._current_ticker: str = ""
         self._current_name: str = ""
@@ -104,6 +114,11 @@ class QuoteHeader(QFrame):
         self._meta.setText("  ·  ".join(p for p in parts if p))
         self._add_btn.setEnabled(bool(self._current_ticker))
         self._add_btn.setText("+ WATCHLIST")
+        self._deep_dive_btn.setEnabled(bool(self._current_ticker))
+
+    def _on_deep_dive(self) -> None:
+        if self._current_ticker:
+            self.deep_dive_clicked.emit(self._current_ticker)
 
     def _on_add_watchlist(self) -> None:
         if not self._current_ticker:
@@ -246,6 +261,8 @@ class FundamentalsSection(QFrame):
 class QuoteScreen(QWidget):
     """Full-screen quote deep-dive."""
 
+    open_deep_dive = pyqtSignal(str)  # emits ticker to open DeepDive tab
+
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
@@ -259,6 +276,7 @@ class QuoteScreen(QWidget):
 
         # Header
         self._header = QuoteHeader()
+        self._header.deep_dive_clicked.connect(self.open_deep_dive)
         layout.addWidget(self._header)
 
         # Top row: price + interval bar

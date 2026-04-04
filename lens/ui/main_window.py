@@ -356,7 +356,12 @@ class MainWindow(QMainWindow):
             return screen
         if screen_type == "quote":
             from lens.ui.screens.quote import QuoteScreen
-            return QuoteScreen(self._config)
+            screen = QuoteScreen(self._config)
+            screen.open_deep_dive.connect(self.open_deep_dive_tab)
+            return screen
+        if screen_type == "deep_dive":
+            from lens.ui.screens.deep_dive import DeepDiveScreen
+            return DeepDiveScreen(self._config)
         if screen_type == "chart":
             from lens.ui.screens.chart import ChartScreen
             return ChartScreen(self._config)
@@ -501,6 +506,16 @@ class MainWindow(QMainWindow):
     def _open_quote_from_ticker(self, ticker: str) -> None:
         """Slot for signals that only carry the ticker (no name)."""
         self._open_quote(ticker, ticker)
+
+    def open_deep_dive_tab(self, ticker: str) -> None:
+        """Open (or switch to) a DeepDive tab for ticker."""
+        ticker = ticker.upper()
+        for i, tab in enumerate(self._tab_data):
+            if tab["type"] == "deep_dive" and tab.get("ticker") == ticker:
+                self._tab_bar.set_active(i)
+                self._on_tab_changed(i)
+                return
+        self._add_tab("deep_dive", label=f"DEEP DIVE · {ticker}", ticker=ticker)
 
     def open_quote(self, ticker: str) -> None:
         """Public method for cross-screen quote navigation."""

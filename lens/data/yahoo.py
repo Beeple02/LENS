@@ -15,6 +15,9 @@ _config = Config()
 _BASE_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 _BASE_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
 _BASE_SUMMARY = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+_BASE_TIMESERIES = (
+    "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{ticker}"
+)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
@@ -329,6 +332,211 @@ async def search(
         return await _fetch(client)
     async with httpx.AsyncClient(timeout=_config.http_timeout) as c:
         return await _fetch(c)
+
+
+# ---------------------------------------------------------------------------
+# Deep-dive helpers (financials timeseries, quoteSummary modules, peers)
+# ---------------------------------------------------------------------------
+
+_ANNUAL_FIELDS = [
+    "annualTotalRevenue", "annualGrossProfit", "annualOperatingIncome",
+    "annualEbitda", "annualNetIncome", "annualBasicEPS", "annualDilutedEPS",
+    "annualResearchAndDevelopment", "annualSellingGeneralAndAdministration",
+    "annualTotalAssets", "annualTotalLiabilitiesNetMinorityInterest",
+    "annualStockholdersEquity", "annualCashAndCashEquivalents",
+    "annualTotalDebt", "annualNetDebt", "annualGoodwillAndOtherIntangibleAssets",
+    "annualInventory", "annualCurrentAssets", "annualCurrentLiabilities",
+    "annualOperatingCashFlow", "annualCapitalExpenditure", "annualFreeCashFlow",
+    "annualCashDividendsPaid", "annualIssuanceOfDebt", "annualRepurchaseOfCapitalStock",
+]
+_QUARTERLY_FIELDS = [f.replace("annual", "quarterly") for f in _ANNUAL_FIELDS]
+
+_EU_TICKER_SUFFIXES = (".PA", ".DE", ".L", ".AS", ".SW", ".MI", ".MC", ".ST", ".HE", ".OL", ".CO", ".VI")
+
+_PEER_FALLBACKS: dict[str, list[str]] = {
+    "luxury":       ["MC.PA", "OR.PA", "RMS.PA", "KER.PA", "EL.PA"],
+    "energy":       ["TTE.PA", "ENGI.PA"],
+    "banking":      ["BNP.PA", "GLE.PA", "ACA.PA"],
+    "aerospace":    ["AIR.PA", "SAF.PA", "HO.PA", "AM.PA"],
+    "pharma":       ["SAN.PA", "BN.PA"],
+    "technology":   ["CAP.PA", "ATO.PA", "DSY.PA"],
+    "telecom":      ["ORA.PA", "PUB.PA"],
+}
+
+
+async def _fetch_timeseries_data(
+    ticker: str,
+    fields: list[str],
+    c: httpx.AsyncClient,
+) -> dict[str, dict[str, float]]:
+    """Fetch fundamentals timeseries. Returns {field_name: {date_str: raw_value}}."""
+    import time as _time
+    period2 = int(_time.time())
+    period1 = period2 - 5 * 365 * 24 * 3600
+    url = _BASE_TIMESERIES.format(ticker=ticker)
+    params: dict[str, Any] = {
+        "period1": period1,
+        "period2": period2,
+        "merge": "false",
+        "type": ",".join(fields),
+    }
+    try:
+        data = await _get(c, url, params)
+    except Exception:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for item in data.get("timeseries", {}).get("result", []):
+        field_name: str = item.get("type", "")
+        if not field_name:
+            continue
+        entries = item.get(field_name) or []
+        series: dict[str, float] = {}
+        for entry in entries:
+            date_str = entry.get("asOfDate", "")
+            reported = entry.get("reportedValue", {})
+            raw = reported.get("raw") if isinstance(reported, dict) else reported
+            if date_str and raw is not None:
+                try:
+                    series[date_str] = float(raw)
+                except (TypeError, ValueError):
+                    pass
+        if series:
+            out[field_name] = series
+    return out
+
+
+async def _fetch_summary_modules(
+    ticker: str,
+    modules: str,
+    c: httpx.AsyncClient,
+) -> dict[str, Any]:
+    """quoteSummary with crumb auth; returns the first result dict."""
+    url = _BASE_SUMMARY.format(ticker=ticker)
+    crumb = await _ensure_crumb(c)
+    params: dict[str, Any] = {"modules": modules}
+    if crumb:
+        params["crumb"] = crumb
+    try:
+        data = await _get(c, url, params)
+    except Exception as exc:
+        if "401" in str(exc):
+            _invalidate_crumb()
+            crumb = await _ensure_crumb(c)
+            if crumb:
+                params["crumb"] = crumb
+            data = await _get(c, url, params)
+        else:
+            raise
+    qs = data.get("quoteSummary", {}).get("result")
+    if not qs:
+        return {}
+    return qs[0]
+
+
+async def _fetch_peer_data(ticker: str, c: httpx.AsyncClient) -> dict[str, Any]:
+    """Discover EU peers via industry search + fetch their key stats."""
+    # Step 1: get sector/industry from summaryProfile
+    sector = industry = ""
+    try:
+        profile_result = await _fetch_summary_modules(ticker, "summaryProfile", c)
+        sp = profile_result.get("summaryProfile", {})
+        sector = sp.get("sector", "")
+        industry = sp.get("industry", "")
+    except Exception:
+        pass
+
+    # Step 2: search for EU-listed companies in same industry
+    peer_tickers: list[str] = []
+    if industry:
+        try:
+            srch = await _get(c, _BASE_SEARCH, {
+                "q": industry, "lang": "en", "region": "FR",
+                "quotesCount": 12, "newsCount": 0,
+            })
+            for q in srch.get("quotes", []):
+                sym = q.get("symbol", "")
+                if sym == ticker:
+                    continue
+                if any(sym.endswith(sfx) for sfx in _EU_TICKER_SUFFIXES):
+                    peer_tickers.append(sym)
+                if len(peer_tickers) >= 5:
+                    break
+        except Exception:
+            pass
+
+    # Step 3: fallback if fewer than 3 EU peers found
+    if len(peer_tickers) < 3:
+        combined = f"{sector} {industry}".lower()
+        for key, fallback in _PEER_FALLBACKS.items():
+            if key in combined:
+                peer_tickers = [t for t in fallback if t != ticker][:5]
+                break
+
+    # Step 4: fetch stats for target + all peers
+    all_tickers = [ticker] + peer_tickers
+    peer_mods = "defaultKeyStatistics,financialData,summaryDetail"
+    gather_results = await asyncio.gather(
+        *[_fetch_summary_modules(t, peer_mods, c) for t in all_tickers],
+        return_exceptions=True,
+    )
+    all_data: dict[str, dict] = {}
+    for t, r in zip(all_tickers, gather_results):
+        if not isinstance(r, Exception):
+            all_data[t] = r
+
+    return {
+        "target":   ticker,
+        "tickers":  peer_tickers,
+        "data":     all_data,
+        "sector":   sector,
+        "industry": industry,
+    }
+
+
+async def get_deep_dive(ticker: str) -> dict[str, Any]:
+    """
+    Fetch all data needed for the DeepDive screen concurrently.
+    Returns dict with keys: quote, financials, earnings, analysts,
+    dividends, ownership, peers.
+    """
+    async with httpx.AsyncClient(timeout=30) as c:
+        await _ensure_crumb(c)
+
+        # Dividend chart events (no crumb needed)
+        async def _div_chart() -> dict:
+            url = _BASE_CHART.format(ticker=ticker)
+            try:
+                d = await _get(c, url, {"events": "dividends,splits", "range": "10y", "interval": "1d"})
+                return d.get("chart", {}).get("result", [{}])[0].get("events", {}).get("dividends", {})
+            except Exception:
+                return {}
+
+        results = await asyncio.gather(
+            get_quote(ticker, client=c),
+            _fetch_timeseries_data(ticker, _ANNUAL_FIELDS, c),
+            _fetch_timeseries_data(ticker, _QUARTERLY_FIELDS, c),
+            _fetch_summary_modules(ticker, "earnings,earningsHistory,earningsTrend,calendarEvents", c),
+            _fetch_summary_modules(ticker, "recommendationTrend,upgradeDowngradeHistory,financialData,defaultKeyStatistics", c),
+            _fetch_summary_modules(ticker, "summaryDetail,defaultKeyStatistics", c),
+            _fetch_summary_modules(ticker, "insiderTransactions,insiderHolders,institutionOwnership,majorHoldersBreakdown,fundOwnership,netSharePurchaseActivity", c),
+            _div_chart(),
+            _fetch_peer_data(ticker, c),
+            return_exceptions=True,
+        )
+
+        def _s(v: Any, default: Any) -> Any:
+            return default if isinstance(v, Exception) else v
+
+        quote_r, annual_r, qtr_r, earn_r, anal_r, div_qs_r, own_r, div_chart_r, peers_r = results
+        return {
+            "quote":      _s(quote_r, {}),
+            "financials": {"annual": _s(annual_r, {}), "quarterly": _s(qtr_r, {})},
+            "earnings":   _s(earn_r, {}),
+            "analysts":   _s(anal_r, {}),
+            "dividends":  {**_s(div_qs_r, {}), "chart_events": _s(div_chart_r, {})},
+            "ownership":  _s(own_r, {}),
+            "peers":      _s(peers_r, {"target": ticker, "tickers": [], "data": {}, "sector": "", "industry": ""}),
+        }
 
 
 if __name__ == "__main__":
