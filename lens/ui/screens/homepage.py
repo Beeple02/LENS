@@ -265,8 +265,8 @@ class HomepageScreen(QWidget):
         self._refresh_timer.stop()
         for w in (self._markets_worker, self._wl_worker, self._portfolio_worker):
             if w is not None and w.isRunning():
-                w.quit()
-                w.wait(1000)
+                w.terminate()
+                w.wait()
 
     # ── Data loading ──────────────────────────────────────────────────────
 
@@ -274,8 +274,9 @@ class HomepageScreen(QWidget):
         from lens.ui.workers import FetchMarketsWorker
         if self._markets_worker and self._markets_worker.isRunning():
             return
-        self._markets_worker = FetchMarketsWorker(self)
+        self._markets_worker = FetchMarketsWorker()  # no parent — we manage lifetime
         self._markets_worker.result.connect(self._on_markets)
+        self._markets_worker.finished.connect(self._markets_worker.deleteLater)
         self._markets_worker.start()
 
     def _on_markets(self, data: list) -> None:
@@ -289,8 +290,9 @@ class HomepageScreen(QWidget):
         wl = Config().default_watchlist
         if self._wl_worker and self._wl_worker.isRunning():
             return
-        self._wl_worker = FetchWatchlistWorker(wl, self)
+        self._wl_worker = FetchWatchlistWorker(wl)  # no parent
         self._wl_worker.result.connect(self._wl_panel.update_rows)
+        self._wl_worker.finished.connect(self._wl_worker.deleteLater)
         self._wl_worker.start()
 
     def _load_portfolio_nav(self) -> None:
@@ -299,6 +301,7 @@ class HomepageScreen(QWidget):
         account = Config().default_account
         if self._portfolio_worker and self._portfolio_worker.isRunning():
             return
-        self._portfolio_worker = PortfolioNAVWorker(account, self)
+        self._portfolio_worker = PortfolioNAVWorker(account)  # no parent
         self._portfolio_worker.result.connect(self._port_graph.update_nav)
+        self._portfolio_worker.finished.connect(self._portfolio_worker.deleteLater)
         self._portfolio_worker.start()

@@ -427,12 +427,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _stop_screen_threads(screen: QWidget) -> None:
-        """Quit and wait for all QThread workers attached to a screen."""
+        """Terminate and wait for all QThread workers attached to a screen."""
         from PyQt6.QtCore import QThread
         for attr in vars(screen).values():
             if isinstance(attr, QThread) and attr.isRunning():
-                attr.quit()
-                attr.wait(1000)
+                attr.terminate()
+                attr.wait()
 
     def _on_tab_closed(self, idx: int) -> None:
         if len(self._tab_data) <= 1:
