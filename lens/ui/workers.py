@@ -544,11 +544,15 @@ class FetchDeepDiveWorker(QThread):
             )
 
             async with httpx.AsyncClient(timeout=30) as c:
+                _log.info("DeepDive fetch started — %s", self.ticker)
+
                 # Header first — fires before any heavy fetch
                 try:
                     q = await get_quote(self.ticker, client=c)
                     self.header_ready.emit(q)
+                    _log.debug("DeepDive header ready — %s  price=%s", self.ticker, q.get("price"))
                 except Exception as e:
+                    _log.error("DeepDive header failed — %s: %s", self.ticker, e)
                     self.error.emit("header", str(e))
 
                 # Prime crumb before parallel authenticated requests
@@ -566,8 +570,10 @@ class FetchDeepDiveWorker(QThread):
                             _fetch_timeseries_data(self.ticker, _QUARTERLY_FIELDS, c),
                         )
                         self.financials_ready.emit({"annual": ann, "quarterly": qtr})
+                        _log.debug("DeepDive financials ready — %s  annual=%d fields, quarterly=%d fields",
+                                   self.ticker, len(ann), len(qtr))
                     except Exception as e:
-                        _log.error("DeepDive financials failed: %s", e)
+                        _log.error("DeepDive financials failed — %s: %s", self.ticker, e)
                         self.error.emit("financials", str(e))
 
                 async def _earnings() -> None:
@@ -578,8 +584,9 @@ class FetchDeepDiveWorker(QThread):
                             c,
                         )
                         self.earnings_ready.emit(d)
+                        _log.debug("DeepDive earnings ready — %s", self.ticker)
                     except Exception as e:
-                        _log.error("DeepDive earnings failed: %s", e)
+                        _log.error("DeepDive earnings failed — %s: %s", self.ticker, e)
                         self.error.emit("earnings", str(e))
 
                 async def _analysts() -> None:
@@ -590,8 +597,9 @@ class FetchDeepDiveWorker(QThread):
                             c,
                         )
                         self.analysts_ready.emit(d)
+                        _log.debug("DeepDive analysts ready — %s", self.ticker)
                     except Exception as e:
-                        _log.error("DeepDive analysts failed: %s", e)
+                        _log.error("DeepDive analysts failed — %s: %s", self.ticker, e)
                         self.error.emit("analysts", str(e))
 
                 async def _dividends() -> None:
@@ -611,8 +619,9 @@ class FetchDeepDiveWorker(QThread):
                             self.ticker, "summaryDetail,defaultKeyStatistics", c
                         )
                         self.dividends_ready.emit({**qs, "chart_events": div_events})
+                        _log.debug("DeepDive dividends ready — %s  events=%d", self.ticker, len(div_events))
                     except Exception as e:
-                        _log.error("DeepDive dividends failed: %s", e)
+                        _log.error("DeepDive dividends failed — %s: %s", self.ticker, e)
                         self.error.emit("dividends", str(e))
 
                 async def _ownership() -> None:
@@ -624,25 +633,29 @@ class FetchDeepDiveWorker(QThread):
                             c,
                         )
                         self.ownership_ready.emit(d)
+                        _log.debug("DeepDive ownership ready — %s", self.ticker)
                     except Exception as e:
-                        _log.error("DeepDive ownership failed: %s", e)
+                        _log.error("DeepDive ownership failed — %s: %s", self.ticker, e)
                         self.error.emit("ownership", str(e))
 
                 async def _peers() -> None:
                     try:
                         d = await _fetch_peer_data(self.ticker, c)
                         self.peers_ready.emit(d)
+                        _log.debug("DeepDive peers ready — %s  peers=%s",
+                                   self.ticker, d.get("tickers", []))
                     except Exception as e:
-                        _log.error("DeepDive peers failed: %s", e)
+                        _log.error("DeepDive peers failed — %s: %s", self.ticker, e)
                         self.error.emit("peers", str(e))
 
                 await asyncio.gather(
                     _financials(), _earnings(), _analysts(),
                     _dividends(), _ownership(), _peers(),
                 )
+                _log.info("DeepDive fetch complete — %s", self.ticker)
 
         try:
             _run(_main())
         except Exception as e:
-            _log.error("FetchDeepDiveWorker crashed: %s", e)
+            _log.error("FetchDeepDiveWorker crashed — %s: %s", self.ticker, e)
             self.error.emit("general", str(e))

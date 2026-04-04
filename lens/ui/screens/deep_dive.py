@@ -1174,8 +1174,10 @@ class DeepDiveScreen(QWidget):
         self._tabs.addTab(self._own,  "Ownership")
 
     def load_ticker(self, ticker: str) -> None:
+        import logging
         self._ticker = ticker.upper()
         self._header.set_ticker(self._ticker)
+        logging.getLogger("lens.deep_dive").info("Opening Deep Dive — %s", self._ticker)
         self._start_worker()
 
     def on_show(self) -> None:
