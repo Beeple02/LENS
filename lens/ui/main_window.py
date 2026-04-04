@@ -351,7 +351,9 @@ class MainWindow(QMainWindow):
     def _make_screen(self, screen_type: str) -> QWidget:
         if screen_type == "homepage":
             from lens.ui.screens.homepage import HomepageScreen
-            return HomepageScreen(self._config)
+            screen = HomepageScreen(self._config)
+            screen.open_quote.connect(self._open_quote_from_ticker)
+            return screen
         if screen_type == "quote":
             from lens.ui.screens.quote import QuoteScreen
             return QuoteScreen(self._config)
@@ -495,6 +497,10 @@ class MainWindow(QMainWindow):
 
         # 3. Create a new Quote tab
         self._add_tab("quote", label=ticker, ticker=ticker)
+
+    def _open_quote_from_ticker(self, ticker: str) -> None:
+        """Slot for signals that only carry the ticker (no name)."""
+        self._open_quote(ticker, ticker)
 
     def open_quote(self, ticker: str) -> None:
         """Public method for cross-screen quote navigation."""

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea,
     QSizePolicy, QSplitter, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -43,6 +43,8 @@ def _section(title: str) -> QLabel:
 class MoversTable(QFrame):
     """Top/Bottom movers table."""
 
+    ticker_clicked = pyqtSignal(str)
+
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
         self.setProperty("class", "panel")
@@ -64,7 +66,13 @@ class MoversTable(QFrame):
             self._table.horizontalHeader().setSectionResizeMode(
                 i, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setMaximumHeight(380)
+        self._table.cellClicked.connect(self._on_cell_clicked)
         layout.addWidget(self._table)
+
+    def _on_cell_clicked(self, row: int, _col: int) -> None:
+        item = self._table.item(row, 0)  # column 0 = TICKER
+        if item:
+            self.ticker_clicked.emit(item.text())
 
     def update_rows(self, rows: list[dict]) -> None:
         self._table.setRowCount(len(rows))
@@ -199,6 +207,8 @@ class WatchlistMiniPanel(QFrame):
 class HomepageScreen(QWidget):
     """Homepage: EU movers | news WIP | portfolio graph | watchlist."""
 
+    open_quote = pyqtSignal(str)  # ticker to open in a new Quote tab
+
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
@@ -216,6 +226,8 @@ class HomepageScreen(QWidget):
 
         self._winners = MoversTable("▲  TOP MOVERS")
         self._losers  = MoversTable("▼  BOTTOM MOVERS")
+        self._winners.ticker_clicked.connect(self.open_quote)
+        self._losers.ticker_clicked.connect(self.open_quote)
         movers_row.addWidget(self._winners)
         movers_row.addWidget(self._losers)
         movers_row.setSizes([700, 700])
