@@ -264,19 +264,34 @@ class HomepageScreen(QWidget):
         """Stop all background workers cleanly (called before widget deletion)."""
         self._refresh_timer.stop()
         for w in (self._markets_worker, self._wl_worker, self._portfolio_worker):
-            if w is not None and w.isRunning():
-                w.terminate()
-                w.wait()
+            if w is None:
+                continue
+            try:
+                if w.isRunning():
+                    w.terminate()
+                    w.wait()
+            except RuntimeError:
+                pass  # C++ object already deleted (worker finished and auto-deleted)
+        self._markets_worker = None
+        self._wl_worker = None
+        self._portfolio_worker = None
 
     # ── Data loading ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_running(worker) -> bool:
+        """Safe isRunning() guard — returns False if C++ object already deleted."""
+        try:
+            return worker.isRunning()
+        except RuntimeError:
+            return False
+
     def _load_markets(self) -> None:
         from lens.ui.workers import FetchMarketsWorker
-        if self._markets_worker and self._markets_worker.isRunning():
+        if self._markets_worker and self._is_running(self._markets_worker):
             return
-        self._markets_worker = FetchMarketsWorker()  # no parent — we manage lifetime
+        self._markets_worker = FetchMarketsWorker()
         self._markets_worker.result.connect(self._on_markets)
-        self._markets_worker.finished.connect(self._markets_worker.deleteLater)
         self._markets_worker.start()
 
     def _on_markets(self, data: list) -> None:
@@ -288,20 +303,18 @@ class HomepageScreen(QWidget):
         from lens.ui.workers import FetchWatchlistWorker
         from lens.config import Config
         wl = Config().default_watchlist
-        if self._wl_worker and self._wl_worker.isRunning():
+        if self._wl_worker and self._is_running(self._wl_worker):
             return
-        self._wl_worker = FetchWatchlistWorker(wl)  # no parent
+        self._wl_worker = FetchWatchlistWorker(wl)
         self._wl_worker.result.connect(self._wl_panel.update_rows)
-        self._wl_worker.finished.connect(self._wl_worker.deleteLater)
         self._wl_worker.start()
 
     def _load_portfolio_nav(self) -> None:
         from lens.ui.workers import PortfolioNAVWorker
         from lens.config import Config
         account = Config().default_account
-        if self._portfolio_worker and self._portfolio_worker.isRunning():
+        if self._portfolio_worker and self._is_running(self._portfolio_worker):
             return
-        self._portfolio_worker = PortfolioNAVWorker(account)  # no parent
+        self._portfolio_worker = PortfolioNAVWorker(account)
         self._portfolio_worker.result.connect(self._port_graph.update_nav)
-        self._portfolio_worker.finished.connect(self._portfolio_worker.deleteLater)
         self._portfolio_worker.start()

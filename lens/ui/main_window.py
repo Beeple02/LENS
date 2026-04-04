@@ -430,9 +430,14 @@ class MainWindow(QMainWindow):
         """Terminate and wait for all QThread workers attached to a screen."""
         from PyQt6.QtCore import QThread
         for attr in vars(screen).values():
-            if isinstance(attr, QThread) and attr.isRunning():
-                attr.terminate()
-                attr.wait()
+            if not isinstance(attr, QThread):
+                continue
+            try:
+                if attr.isRunning():
+                    attr.terminate()
+                    attr.wait()
+            except RuntimeError:
+                pass  # C++ object already deleted
 
     def _on_tab_closed(self, idx: int) -> None:
         if len(self._tab_data) <= 1:
