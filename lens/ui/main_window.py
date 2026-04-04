@@ -425,12 +425,25 @@ class MainWindow(QMainWindow):
             if hasattr(screen, "on_show"):
                 screen.on_show()
 
+    @staticmethod
+    def _stop_screen_threads(screen: QWidget) -> None:
+        """Quit and wait for all QThread workers attached to a screen."""
+        from PyQt6.QtCore import QThread
+        for attr in vars(screen).values():
+            if isinstance(attr, QThread) and attr.isRunning():
+                attr.quit()
+                attr.wait(1000)
+
     def _on_tab_closed(self, idx: int) -> None:
         if len(self._tab_data) <= 1:
             return  # never close the last tab
 
         tab = self._tab_data.pop(idx)
         screen = tab["screen"]
+        if hasattr(screen, "cleanup"):
+            screen.cleanup()
+        else:
+            self._stop_screen_threads(screen)
         self._stack.removeWidget(screen)
         screen.deleteLater()
         self._tab_bar.remove_tab(idx)
@@ -533,11 +546,6 @@ class MainWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        from PyQt6.QtCore import QThread
         for tab in self._tab_data:
-            screen = tab["screen"]
-            for attr in vars(screen).values():
-                if isinstance(attr, QThread) and attr.isRunning():
-                    attr.quit()
-                    attr.wait(500)
+            self._stop_screen_threads(tab["screen"])
         event.accept()

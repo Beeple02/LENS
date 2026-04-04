@@ -260,6 +260,14 @@ class HomepageScreen(QWidget):
         self._load_watchlist()
         self._load_portfolio_nav()
 
+    def cleanup(self) -> None:
+        """Stop all background workers cleanly (called before widget deletion)."""
+        self._refresh_timer.stop()
+        for w in (self._markets_worker, self._wl_worker, self._portfolio_worker):
+            if w is not None and w.isRunning():
+                w.quit()
+                w.wait(1000)
+
     # ── Data loading ──────────────────────────────────────────────────────
 
     def _load_markets(self) -> None:
