@@ -161,28 +161,21 @@ class FetchWatchlistWorker(QThread):
                 async with httpx.AsyncClient(timeout=cfg.http_timeout) as client:
                     items = []
                     for row in rows:
+                        ticker = row["ticker"]
+                        name   = row["name"] or ticker
+                        isin   = row["isin"]  if "isin"  in row.keys() else None
+                        mic    = row["mic"]   if "mic"   in row.keys() and row["mic"] else "XPAR"
                         try:
-                            q = await get_quote(row["ticker"], client=client)
-                            items.append({
-                                "ticker": row["ticker"],
-                                "name": row.get("name", row["ticker"]),
-                                "isin": row.get("isin"),
-                                "mic": row.get("mic", "XPAR"),
-                                **q,
-                            })
-                        except Exception:
-                            items.append({
-                                "ticker": row["ticker"],
-                                "name": row.get("name", row["ticker"]),
-                                "isin": row.get("isin"),
-                                "mic": row.get("mic", "XPAR"),
-                                "price": None,
-                                "change": None,
-                                "change_pct": None,
-                                "volume": None,
-                                "high": None,
-                                "low": None,
-                            })
+                            q = await get_quote(ticker, client=client)
+                            items.append({"ticker": ticker, "name": name,
+                                          "isin": isin, "mic": mic, **q})
+                        except Exception as qe:
+                            _log.warning("Quote fetch failed for %s: %s", ticker, qe)
+                            items.append({"ticker": ticker, "name": name,
+                                          "isin": isin, "mic": mic,
+                                          "price": None, "change": None,
+                                          "change_pct": None, "volume": None,
+                                          "high": None, "low": None})
                     return items
 
             results = _run(fetch_all())

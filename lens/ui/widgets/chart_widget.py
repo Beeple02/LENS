@@ -46,7 +46,14 @@ class CandlestickItem(pg.GraphicsObject):
         p = QPainter(picture)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        w = 0.38  # half candle body width
+        w = 0.4   # half candle body width in data units
+
+        # Cosmetic pens are always 1px wide in SCREEN pixels regardless of zoom
+        # — without this, pen widths in data units become sub-pixel and invisible
+        def _cpen(color: QColor, width: float = 1.0) -> QPen:
+            pen = QPen(color, width)
+            pen.setCosmetic(True)
+            return pen
 
         for i, candle in enumerate(self._data):
             o = candle.get("open")
@@ -63,17 +70,17 @@ class CandlestickItem(pg.GraphicsObject):
             body_bot = min(o, c)
             body_h   = max(body_top - body_bot, 0.0001)
 
-            # Wick — thin, same color as body
-            p.setPen(QPen(color, 0.8))
-            p.drawLine(pg.Point(i, l), pg.Point(i, body_bot))
+            # Wicks — 1px cosmetic, drawn only outside the body
+            p.setPen(_cpen(color, 1.0))
+            p.drawLine(pg.Point(i, l),        pg.Point(i, body_bot))
             p.drawLine(pg.Point(i, body_top), pg.Point(i, h))
 
-            # Body — hollow (outline only) for bullish, filled for bearish
+            # Body — hollow green outline for bullish, solid red fill for bearish
             if bullish:
-                p.setPen(QPen(color, 1.0))
+                p.setPen(_cpen(color, 1.5))
                 p.setBrush(QBrush(_Qt.BrushStyle.NoBrush))
             else:
-                p.setPen(QPen(color, 0.5))
+                p.setPen(_cpen(color, 1.0))
                 p.setBrush(QBrush(color))
 
             p.drawRect(QRectF(i - w, body_bot, w * 2, body_h))
