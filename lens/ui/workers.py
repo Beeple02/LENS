@@ -116,13 +116,15 @@ class FetchFundamentalsWorker(QThread):
     def run(self) -> None:
         try:
             from lens.data.yahoo import get_fundamentals
-            from lens.db.store import fundamentals_stale, upsert_fundamentals
+            from lens.db.store import fundamentals_stale, upsert_fundamentals, upsert_security
             from lens.config import Config
             cfg = Config()
 
             if fundamentals_stale(self.ticker, cfg.cache_fundamentals_hours):
                 data = _run(get_fundamentals(self.ticker))
                 if data:
+                    # Ensure security row exists before writing fundamentals (FK constraint)
+                    upsert_security(ticker=self.ticker, name=self.ticker)
                     upsert_fundamentals(self.ticker, data)
                 self.result.emit(data)
             else:

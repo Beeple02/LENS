@@ -368,6 +368,9 @@ class QuoteScreen(QWidget):
         sec_data = dict(sec) if sec else {"ticker": self._ticker, "name": self._ticker}
         self._header.update(sec_data)
 
+        # Clear stale fundamentals immediately so old ticker's data never persists
+        self._on_fund_result({})
+
         # Fetch live quote
         self._load_quote()
 
