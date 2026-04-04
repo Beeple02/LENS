@@ -312,6 +312,16 @@ class QuoteScreen(QWidget):
             )
             iv_layout.addWidget(btn)
 
+        iv_layout.addSpacing(16)
+
+        # Log scale toggle
+        log_btn = QPushButton("LOG")
+        log_btn.setProperty("class", "interval-btn")
+        log_btn.setCheckable(True)
+        log_btn.setToolTip("Toggle logarithmic Y axis")
+        log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
+        iv_layout.addWidget(log_btn)
+
         iv_layout.addStretch()
         top_layout.addWidget(iv_frame)
         layout.addWidget(top_row)

@@ -278,13 +278,31 @@ async def get_fundamentals(
         return await _fetch(c)
 
 
+_EUROPEAN_EXCHANGES = frozenset({
+    # Euronext
+    "PAR", "AMS", "BRU", "LIS", "DUB", "OSL",
+    # Germany
+    "GER", "FRA", "ETR", "STU", "DUS", "HAM", "MUN", "BER", "TLX",
+    # UK
+    "LSE", "IOB",
+    # Nordic
+    "STO", "HEL", "CPH", "ICE",
+    # Southern Europe
+    "MIL", "MCE", "ATH",
+    # Other
+    "VIE", "WAR", "BUC", "PRA", "BUD", "SWX", "EBS", "ZRH",
+})
+
+
 async def search(
     query: str,
     client: Optional[httpx.AsyncClient] = None,
+    european_only: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Search Yahoo Finance for securities matching a query.
     Returns list of dicts: {ticker, name, exchange, type, isin}
+    By default filters to European exchanges only.
     """
     params = {"q": query, "quotesCount": 20, "newsCount": 0, "listsCount": 0}
 
@@ -293,14 +311,18 @@ async def search(
         quotes = data.get("quotes", [])
         results = []
         for q in quotes:
-            if q.get("quoteType") in ("EQUITY", "ETF", "INDEX"):
-                results.append({
-                    "ticker": q.get("symbol", ""),
-                    "name": q.get("longname") or q.get("shortname", ""),
-                    "exchange": q.get("exchange", ""),
-                    "type": q.get("quoteType", ""),
-                    "isin": None,  # Yahoo doesn't return ISIN in search
-                })
+            if q.get("quoteType") not in ("EQUITY", "ETF", "INDEX"):
+                continue
+            exchange = q.get("exchange", "")
+            if european_only and exchange not in _EUROPEAN_EXCHANGES:
+                continue
+            results.append({
+                "ticker":   q.get("symbol", ""),
+                "name":     q.get("longname") or q.get("shortname", ""),
+                "exchange": exchange,
+                "type":     q.get("quoteType", ""),
+                "isin":     None,
+            })
         return results
 
     if client is not None:

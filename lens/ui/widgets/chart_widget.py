@@ -200,6 +200,10 @@ class ChartWidget(QWidget):
         self._mode = mode
         self._redraw()
 
+    def set_log_mode(self, enabled: bool) -> None:
+        """Toggle logarithmic Y axis on the price plot."""
+        self._price_plot.setLogMode(x=False, y=enabled)
+
     def toggle_sma(self, period: int, enabled: bool) -> None:
         self._sma.discard(period)
         if enabled:

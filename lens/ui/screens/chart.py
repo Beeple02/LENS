@@ -109,6 +109,18 @@ class ChartScreen(QWidget):
             tb_layout.addWidget(btn)
             self._sma_btns.append(btn)
 
+        sep4 = QFrame()
+        sep4.setFrameShape(QFrame.Shape.VLine)
+        sep4.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep4)
+
+        log_btn = QPushButton("LOG")
+        log_btn.setProperty("class", "interval-btn")
+        log_btn.setCheckable(True)
+        log_btn.setToolTip("Toggle logarithmic Y axis")
+        log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
+        tb_layout.addWidget(log_btn)
+
         tb_layout.addStretch()
 
         self._ticker_label = QLabel()
