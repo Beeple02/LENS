@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -54,6 +54,8 @@ def _fmt_fund(v, mode=None, decimals=2):
 
 
 class QuoteHeader(QFrame):
+    deep_dive_clicked = pyqtSignal(str)  # emits ticker when DEEP DIVE button pressed
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setProperty("class", "panel")
@@ -80,35 +82,58 @@ class QuoteHeader(QFrame):
         self._add_btn.setFixedWidth(100)
         self._add_btn.clicked.connect(self._on_add_watchlist)
 
+        self._deep_dive_btn = QPushButton("DEEP DIVE ↗")
+        self._deep_dive_btn.setProperty("class", "interval-btn")
+        self._deep_dive_btn.setEnabled(False)
+        self._deep_dive_btn.setFixedWidth(110)
+        self._deep_dive_btn.clicked.connect(self._on_deep_dive)
+
         layout.addWidget(self._name)
         layout.addWidget(self._ticker)
         layout.addWidget(self._isin)
         layout.addWidget(self._meta)
         layout.addStretch()
         layout.addWidget(self._add_btn)
+        layout.addSpacing(8)
+        layout.addWidget(self._deep_dive_btn)
 
         self._current_ticker: str = ""
+        self._current_name: str = ""
+        self._current_currency: str = "EUR"
 
     def update(self, sec: dict) -> None:
-        self._current_ticker = sec.get("ticker", "")
-        self._name.setText(sec.get("name", ""))
+        self._current_ticker  = sec.get("ticker", "")
+        self._current_name    = sec.get("name", self._current_ticker)
+        self._current_currency = sec.get("currency", "EUR")
+        self._name.setText(self._current_name)
         self._ticker.setText(self._current_ticker)
         isin = sec.get("isin", "")
         self._isin.setText(isin or "")
         self._isin.setVisible(bool(isin))
-        parts = [sec.get("mic", ""), sec.get("currency", ""), sec.get("sector", "")]
+        parts = [sec.get("mic", ""), self._current_currency, sec.get("sector", "")]
         self._meta.setText("  ·  ".join(p for p in parts if p))
         self._add_btn.setEnabled(bool(self._current_ticker))
         self._add_btn.setText("+ WATCHLIST")
+        self._deep_dive_btn.setEnabled(bool(self._current_ticker))
+
+    def _on_deep_dive(self) -> None:
+        if self._current_ticker:
+            self.deep_dive_clicked.emit(self._current_ticker)
 
     def _on_add_watchlist(self) -> None:
         if not self._current_ticker:
             return
         import logging
-        from lens.db.store import add_to_watchlist, create_watchlist
+        from lens.db.store import add_to_watchlist, create_watchlist, upsert_security
         from lens.config import Config
         wl = Config().default_watchlist
         try:
+            # Ensure security exists in DB before adding FK-constrained watchlist entry
+            upsert_security(
+                ticker=self._current_ticker,
+                name=self._current_name,
+                currency=self._current_currency,
+            )
             create_watchlist(wl)
             add_to_watchlist(wl, self._current_ticker)
             self._add_btn.setText("✓ ADDED")
@@ -236,6 +261,8 @@ class FundamentalsSection(QFrame):
 class QuoteScreen(QWidget):
     """Full-screen quote deep-dive."""
 
+    open_deep_dive = pyqtSignal(str)  # emits ticker to open DeepDive tab
+
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
@@ -249,6 +276,7 @@ class QuoteScreen(QWidget):
 
         # Header
         self._header = QuoteHeader()
+        self._header.deep_dive_clicked.connect(self.open_deep_dive)
         layout.addWidget(self._header)
 
         # Top row: price + interval bar
@@ -301,6 +329,16 @@ class QuoteScreen(QWidget):
                 lambda checked, p=period: self._chart.toggle_sma(p, checked)
             )
             iv_layout.addWidget(btn)
+
+        iv_layout.addSpacing(16)
+
+        # Log scale toggle
+        log_btn = QPushButton("LOG")
+        log_btn.setProperty("class", "interval-btn")
+        log_btn.setCheckable(True)
+        log_btn.setToolTip("Toggle logarithmic Y axis")
+        log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
+        iv_layout.addWidget(log_btn)
 
         iv_layout.addStretch()
         top_layout.addWidget(iv_frame)
@@ -357,6 +395,9 @@ class QuoteScreen(QWidget):
         sec = get_security_by_ticker(self._ticker)
         sec_data = dict(sec) if sec else {"ticker": self._ticker, "name": self._ticker}
         self._header.update(sec_data)
+
+        # Clear stale fundamentals immediately so old ticker's data never persists
+        self._on_fund_result({})
 
         # Fetch live quote
         self._load_quote()

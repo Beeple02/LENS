@@ -93,13 +93,14 @@ QFrame[class="top-bar"] {
     border-radius: 0px;
 }
 
-/* ── Nav Bar ──────────────────────────────────────────────── */
+/* ── Nav / Tab Bar ────────────────────────────────────────── */
 QFrame[class="nav-bar"] {
     background-color: #000000;
     border-bottom: 1px solid #1f1f1f;
     border-radius: 0px;
 }
 
+/* Legacy nav-btn (kept for compatibility) */
 QPushButton[class="nav-btn"] {
     background-color: #000000;
     color: #555555;
@@ -127,6 +128,73 @@ QPushButton[class="nav-btn"]:checked {
     border-top: none;
     border-left: none;
     border-right: 1px solid #1a1a1a;
+}
+
+/* Dynamic tab frame (wrapper around label + close button) */
+QFrame[class="tab-frame"] {
+    background-color: transparent;
+    border: none;
+    border-right: 1px solid #1a1a1a;
+    border-radius: 0px;
+}
+
+/* Tab label button */
+QPushButton[class="tab-btn"] {
+    background-color: #000000;
+    color: #555555;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 0px 14px;
+    border-radius: 0px;
+}
+
+QPushButton[class="tab-btn"]:hover {
+    background-color: #0d0d0d;
+    color: #f59e0b;
+    border-bottom: 2px solid #f59e0b;
+}
+
+QPushButton[class="tab-btn"]:checked {
+    background-color: #1a1100;
+    color: #f59e0b;
+    border-bottom: 2px solid #f59e0b;
+}
+
+/* Tab × close button */
+QPushButton[class="tab-close-btn"] {
+    background-color: transparent;
+    color: #333333;
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+QPushButton[class="tab-close-btn"]:hover {
+    color: #ff3333;
+    background-color: #1a0000;
+}
+
+/* + add tab button */
+QPushButton[class="add-tab-btn"] {
+    background-color: #000000;
+    color: #555555;
+    border: none;
+    border-left: 1px solid #1a1a1a;
+    border-radius: 0px;
+    font-size: 16px;
+    font-weight: 400;
+    padding: 0px;
+}
+
+QPushButton[class="add-tab-btn"]:hover {
+    color: #f59e0b;
+    background-color: #0d0d00;
 }
 
 /* ── Stat Card ────────────────────────────────────────────── */
