@@ -596,6 +596,23 @@ class FetchDeepDiveWorker(QThread):
                             "recommendationTrend,upgradeDowngradeHistory,financialData,defaultKeyStatistics",
                             c,
                         )
+                        # 3-month weekly price history for consensus trend overlay
+                        try:
+                            ph = await _get(
+                                c,
+                                _BASE_CHART.format(ticker=self.ticker),
+                                {"range": "3mo", "interval": "1wk"},
+                            )
+                            closes = (
+                                ph.get("chart", {})
+                                .get("result", [{}])[0]
+                                .get("indicators", {})
+                                .get("quote", [{}])[0]
+                                .get("close", [])
+                            )
+                            d["_price_3mo"] = [x for x in closes if x is not None]
+                        except Exception:
+                            d["_price_3mo"] = []
                         self.analysts_ready.emit(d)
                         _log.debug("DeepDive analysts ready — %s", self.ticker)
                     except Exception as e:
