@@ -534,11 +534,9 @@ class FetchDeepDiveWorker(QThread):
             from lens.data.yahoo import (
                 get_quote,
                 _ensure_crumb,
-                _fetch_timeseries_data,
+                _fetch_financials_statements,
                 _fetch_summary_modules,
                 _fetch_peer_data,
-                _ANNUAL_FIELDS,
-                _QUARTERLY_FIELDS,
                 _BASE_CHART,
                 _get,
             )
@@ -565,11 +563,10 @@ class FetchDeepDiveWorker(QThread):
 
                 async def _financials() -> None:
                     try:
-                        ann, qtr = await asyncio.gather(
-                            _fetch_timeseries_data(self.ticker, _ANNUAL_FIELDS, c),
-                            _fetch_timeseries_data(self.ticker, _QUARTERLY_FIELDS, c),
-                        )
-                        self.financials_ready.emit({"annual": ann, "quarterly": qtr})
+                        result = await _fetch_financials_statements(self.ticker, c)
+                        self.financials_ready.emit(result)
+                        ann = result.get("annual", {})
+                        qtr = result.get("quarterly", {})
                         _log.debug("DeepDive financials ready — %s  annual=%d fields, quarterly=%d fields",
                                    self.ticker, len(ann), len(qtr))
                     except Exception as e:

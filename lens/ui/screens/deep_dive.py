@@ -802,7 +802,7 @@ class _AnalystsTab(_BaseTab):
         self._ratings_table.setSortingEnabled(True)
 
     def _draw_consensus_trend(self, data: dict) -> None:
-        """Stacked % bars per monthly period + dotted amber price %chg overlay."""
+        """Line chart per analyst stance over 4 monthly periods + dotted amber price overlay."""
         trend = (data.get("recommendationTrend", {}) or {}).get("trend", [])
         if not trend:
             return
@@ -815,38 +815,51 @@ class _AnalystsTab(_BaseTab):
         if not sorted_trend:
             return
 
+        # Compute real month labels from today's date
+        now = datetime.now(timezone.utc)
+        def _period_label(period: str) -> str:
+            try:
+                offset = int(period.replace("m", ""))
+            except ValueError:
+                return period
+            m = now.month + offset
+            y = now.year
+            while m <= 0:
+                m += 12
+                y -= 1
+            return datetime(y, m, 1).strftime("%b %Y")
+
         n = len(sorted_trend)
         keys       = ["strongBuy", "buy", "hold", "sell", "strongSell"]
-        bar_colors = [C_POS, C_POS2, C_AMB, C_NEG2, C_NEG]
-        labels_map = {"-3m": "3M AGO", "-2m": "2M AGO", "-1m": "1M AGO", "0m": "NOW"}
-
-        xs     = np.arange(n, dtype=float)
+        line_colors = [C_POS, C_POS2, C_AMB, C_NEG2, C_NEG]
+        line_labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
         totals = [max(sum(t.get(k, 0) for k in keys), 1) for t in sorted_trend]
+
+        xs = np.arange(n, dtype=float)
+        x_ticks = [
+            (i, _period_label(t.get("period", "")))
+            for i, t in enumerate(sorted_trend)
+        ]
 
         self._trend_plot.clear()
 
-        bottoms = np.zeros(n)
-        for key, color in zip(keys, bar_colors):
-            heights = np.array([
+        # One line per stance
+        for key, color, _lbl in zip(keys, line_colors, line_labels):
+            ys = np.array([
                 t.get(key, 0) / totals[i] * 100
                 for i, t in enumerate(sorted_trend)
             ])
-            bar = pg.BarGraphItem(
-                x=xs, y0=bottoms, height=heights, width=0.7,
-                brush=pg.mkBrush(QColor(color)), pen=pg.mkPen(None),
-            )
-            self._trend_plot.addItem(bar)
-            bottoms = bottoms + heights
+            pen = pg.mkPen(color=QColor(color), width=2)
+            self._trend_plot.plot(xs, ys, pen=pen,
+                                  symbol="o", symbolSize=6,
+                                  symbolBrush=pg.mkBrush(QColor(color)),
+                                  symbolPen=pg.mkPen(None))
 
-        x_ticks = [
-            (i, labels_map.get(t.get("period", ""), t.get("period", "")))
-            for i, t in enumerate(sorted_trend)
-        ]
         self._trend_plot.getAxis("bottom").setTicks([x_ticks])
-        self._trend_plot.setYRange(0, 100, padding=0.02)
-        self._trend_plot.setXRange(-0.5, n - 0.5, padding=0)
+        self._trend_plot.setYRange(0, None, padding=0.1)
+        self._trend_plot.setXRange(-0.3, n - 0.7, padding=0)
 
-        # Price overlay: dotted amber line at ~40% opacity, scaled to 0–100
+        # Price overlay: dotted amber line at ~40% opacity, scaled to analyst % range
         price_data = [p for p in data.get("_price_3mo", []) if p is not None]
         if len(price_data) >= 2:
             base = price_data[0]
@@ -855,7 +868,13 @@ class _AnalystsTab(_BaseTab):
                 vmin = min(pct_vals)
                 vmax = max(pct_vals)
                 rng  = (vmax - vmin) if vmax != vmin else 1.0
-                scaled = [(v - vmin) / rng * 100 for v in pct_vals]
+                # Scale price line to 0–max_analyst_pct range for visual alignment
+                all_ys = [
+                    t.get(k, 0) / totals[i] * 100
+                    for i, t in enumerate(sorted_trend) for k in keys
+                ]
+                y_top = max(all_ys) if all_ys else 100
+                scaled = [(v - vmin) / rng * y_top for v in pct_vals]
                 px = np.linspace(0, n - 1, len(scaled))
                 overlay_color = QColor(C_AMB)
                 overlay_color.setAlpha(100)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -434,6 +435,130 @@ async def _fetch_summary_modules(
     if not qs:
         return {}
     return qs[0]
+
+
+async def _fetch_financials_statements(
+    ticker: str,
+    c: httpx.AsyncClient,
+) -> dict[str, Any]:
+    """Fetch income / balance-sheet / cash-flow history via quoteSummary.
+
+    Returns {"annual": {fieldName: {date_str: value}}, "quarterly": {...}}
+    using the same shape expected by _build_fin_table in deep_dive.py.
+    Uses the quoteSummary history modules which work for EU-listed tickers,
+    unlike the fundamentals-timeseries endpoint.
+    """
+    modules = (
+        "incomeStatementHistory,incomeStatementHistoryQuarterly,"
+        "balanceSheetHistory,balanceSheetHistoryQuarterly,"
+        "cashflowStatementHistory,cashflowStatementHistoryQuarterly"
+    )
+    d = await _fetch_summary_modules(ticker, modules, c)
+
+    def _rv(obj: Any) -> Optional[float]:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            obj = obj.get("raw")
+        try:
+            return float(obj) if obj is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _date_str(stmt: dict) -> str:
+        ed = stmt.get("endDate", {})
+        if isinstance(ed, dict):
+            fmt = ed.get("fmt", "")
+            if fmt:
+                return fmt
+            raw = ed.get("raw")
+            if raw:
+                return datetime.fromtimestamp(raw, tz=timezone.utc).strftime("%Y-%m-%d")
+        elif ed:
+            try:
+                return datetime.fromtimestamp(float(ed), tz=timezone.utc).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        return ""
+
+    def _process(stmts: list, pfx: str) -> dict:
+        out: dict[str, dict[str, float]] = {}
+
+        def _set(field: str, val: Optional[float], dt: str) -> None:
+            if val is not None and dt:
+                out.setdefault(f"{pfx}{field}", {})[dt] = val
+
+        for stmt in stmts:
+            dt = _date_str(stmt)
+            if not dt:
+                continue
+
+            # ── Income Statement ──────────────────────────────────────────
+            _set("TotalRevenue",                    _rv(stmt.get("totalRevenue")), dt)
+            _set("GrossProfit",                     _rv(stmt.get("grossProfit")), dt)
+            _set("OperatingIncome",                 _rv(stmt.get("operatingIncome")), dt)
+            _set("Ebitda",                          _rv(stmt.get("ebitda")), dt)
+            _set("NetIncome",                       _rv(stmt.get("netIncome")), dt)
+            _set("BasicEPS",    _rv(stmt.get("basicEPS") or stmt.get("basicEps")), dt)
+            _set("DilutedEPS",  _rv(stmt.get("dilutedEPS") or stmt.get("dilutedEps")), dt)
+            _set("ResearchAndDevelopment",          _rv(stmt.get("researchDevelopment")), dt)
+            _set("SellingGeneralAndAdministration", _rv(stmt.get("sellingGeneralAdministrative")), dt)
+
+            # ── Balance Sheet ─────────────────────────────────────────────
+            _set("TotalAssets",                         _rv(stmt.get("totalAssets")), dt)
+            _set("TotalLiabilitiesNetMinorityInterest", _rv(stmt.get("totalLiab")), dt)
+            _set("StockholdersEquity",                  _rv(stmt.get("totalStockholderEquity")), dt)
+            _set("CashAndCashEquivalents",              _rv(stmt.get("cash")), dt)
+            _set("Inventory",                           _rv(stmt.get("inventory")), dt)
+            _set("CurrentAssets",                       _rv(stmt.get("totalCurrentAssets")), dt)
+            _set("CurrentLiabilities",                  _rv(stmt.get("totalCurrentLiabilities")), dt)
+
+            ltd  = _rv(stmt.get("longTermDebt"))
+            sltd = _rv(stmt.get("shortLongTermDebt")) or 0.0
+            if ltd is not None:
+                total_debt = (ltd or 0.0) + sltd
+                _set("TotalDebt", total_debt, dt)
+                cash_val = _rv(stmt.get("cash"))
+                if cash_val is not None:
+                    _set("NetDebt", total_debt - cash_val, dt)
+
+            gw   = _rv(stmt.get("goodWill")) or 0.0
+            inta = _rv(stmt.get("intangibleAssets")) or 0.0
+            if gw or inta:
+                _set("GoodwillAndOtherIntangibleAssets", gw + inta, dt)
+
+            # ── Cash Flow ─────────────────────────────────────────────────
+            ocf   = _rv(stmt.get("totalCashFromOperatingActivities"))
+            capex = _rv(stmt.get("capitalExpenditures"))
+            _set("OperatingCashFlow",        ocf, dt)
+            _set("CapitalExpenditure",       capex, dt)
+            _set("CashDividendsPaid",        _rv(stmt.get("dividendsPaid")), dt)
+            _set("IssuanceOfDebt",           _rv(stmt.get("netBorrowings")), dt)
+            _set("RepurchaseOfCapitalStock", _rv(stmt.get("repurchaseOfStock")), dt)
+            if ocf is not None and capex is not None:
+                _set("FreeCashFlow", ocf + capex, dt)
+
+        return out
+
+    annual:    dict[str, dict[str, float]] = {}
+    quarterly: dict[str, dict[str, float]] = {}
+
+    annual.update(_process(
+        d.get("incomeStatementHistory", {}).get("incomeStatementHistory", []), "annual"))
+    quarterly.update(_process(
+        d.get("incomeStatementHistoryQuarterly", {}).get("incomeStatementHistory", []), "quarterly"))
+
+    annual.update(_process(
+        d.get("balanceSheetHistory", {}).get("balanceSheetStatements", []), "annual"))
+    quarterly.update(_process(
+        d.get("balanceSheetHistoryQuarterly", {}).get("balanceSheetStatements", []), "quarterly"))
+
+    annual.update(_process(
+        d.get("cashflowStatementHistory", {}).get("cashflowStatements", []), "annual"))
+    quarterly.update(_process(
+        d.get("cashflowStatementHistoryQuarterly", {}).get("cashflowStatements", []), "quarterly"))
+
+    return {"annual": annual, "quarterly": quarterly}
 
 
 async def _fetch_peer_data(ticker: str, c: httpx.AsyncClient) -> dict[str, Any]:
