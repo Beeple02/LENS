@@ -531,23 +531,14 @@ class _EarningsTab(_BaseTab):
         n = min(8, len(quarterly))
         items    = quarterly[-n:]
         labels   = [it.get("date", "") for it in items]
-        actuals  = [(_sf(it.get("actual")) or 0.0) / 1e9 for it in items]
-        ests     = [(_sf(it.get("estimate")) or 0.0) / 1e9 for it in items]
+        actuals  = [(_sf(it.get("revenue")) or 0.0) / 1e9 for it in items]
+        ests     = [0.0] * n  # financialsChart has no revenue estimates
         xs = np.arange(n, dtype=float)
 
         self._rev_plot.clear()
-        if any(e != 0 for e in ests):
-            self._rev_plot.addItem(pg.BarGraphItem(
-                x=xs - 0.22, height=ests, width=0.38,
-                brush=pg.mkBrush(245, 158, 11, 120)))
-
-        brushes = [
-            pg.mkBrush(34, 197, 94, 220) if a >= e else pg.mkBrush(239, 68, 68, 220)
-            for a, e in zip(actuals, ests)
-        ]
+        brushes = [pg.mkBrush(34, 197, 94, 220) for _ in actuals]
         self._rev_plot.addItem(pg.BarGraphItem(
-            x=xs + 0.22 if any(e != 0 for e in ests) else xs,
-            height=actuals, width=0.38, brushes=brushes))
+            x=xs, height=actuals, width=0.6, brushes=brushes))
 
         ticks = [[(i, labels[i]) for i in range(n)]]
         self._rev_plot.getAxis("bottom").setTicks(ticks)
@@ -609,8 +600,14 @@ class _AnalystsTab(_BaseTab):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        main_lay = QHBoxLayout(self._content)
-        main_lay.setContentsMargins(4, 4, 4, 4)
+        outer_lay = QVBoxLayout(self._content)
+        outer_lay.setContentsMargins(4, 4, 4, 4)
+        outer_lay.setSpacing(8)
+
+        # ── Top row: 3 columns ────────────────────────────────────────────
+        top_row = QWidget()
+        main_lay = QHBoxLayout(top_row)
+        main_lay.setContentsMargins(0, 0, 0, 0)
         main_lay.setSpacing(8)
 
         # ── Left: consensus (35%) ────────────────────────────────────────
@@ -696,10 +693,42 @@ class _AnalystsTab(_BaseTab):
         right_lay.addWidget(self._ratings_table)
         main_lay.addWidget(right, 35)
 
+        outer_lay.addWidget(top_row, 55)
+
+        # ── Bottom: consensus trend chart ─────────────────────────────────
+        trend_frame = QFrame()
+        trend_frame.setProperty("class", "panel")
+        trend_lay = QVBoxLayout(trend_frame)
+        trend_lay.setContentsMargins(12, 8, 12, 8)
+        trend_lay.setSpacing(4)
+
+        trend_hdr = QLabel("CONSENSUS TREND")
+        trend_hdr.setProperty("class", "section-header")
+        trend_lay.addWidget(trend_hdr)
+
+        self._trend_plot = pg.PlotWidget()
+        self._trend_plot.setBackground(C_BG)
+        self._trend_plot.setMinimumHeight(130)
+        self._trend_plot.showAxis("top", False)
+        self._trend_plot.showAxis("right", False)
+        for side in ("left", "bottom"):
+            ax = self._trend_plot.getAxis(side)
+            ax.setTextPen(pg.mkPen(C_DIM))
+            ax.setPen(pg.mkPen("#222222"))
+            ax.setStyle(tickFont=QFont("Consolas", 8))
+        self._trend_plot.getAxis("left").setLabel("%", color=C_DIM)
+        self._trend_plot.setYRange(0, 100, padding=0.02)
+        self._trend_plot.setMenuEnabled(False)
+        self._trend_plot.hideButtons()
+        trend_lay.addWidget(self._trend_plot)
+
+        outer_lay.addWidget(trend_frame, 45)
+
     def on_data(self, data: dict) -> None:
         self._fill_consensus(data)
         self._fill_targets(data)
         self._fill_ratings(data)
+        self._draw_consensus_trend(data)
         self._show_content()
 
     def _fill_consensus(self, data: dict) -> None:
@@ -771,6 +800,70 @@ class _AnalystsTab(_BaseTab):
             self._ratings_table.setItem(ri, 2, _twi(action, _C))
             self._ratings_table.setItem(ri, 3, _twi(to_grade, _C, grade_color))
         self._ratings_table.setSortingEnabled(True)
+
+    def _draw_consensus_trend(self, data: dict) -> None:
+        """Stacked % bars per monthly period + dotted amber price %chg overlay."""
+        trend = (data.get("recommendationTrend", {}) or {}).get("trend", [])
+        if not trend:
+            return
+
+        period_order = {"-3m": 0, "-2m": 1, "-1m": 2, "0m": 3}
+        sorted_trend = sorted(
+            [t for t in trend if t.get("period") in period_order],
+            key=lambda t: period_order[t["period"]],
+        )
+        if not sorted_trend:
+            return
+
+        n = len(sorted_trend)
+        keys       = ["strongBuy", "buy", "hold", "sell", "strongSell"]
+        bar_colors = [C_POS, C_POS2, C_AMB, C_NEG2, C_NEG]
+        labels_map = {"-3m": "3M AGO", "-2m": "2M AGO", "-1m": "1M AGO", "0m": "NOW"}
+
+        xs     = np.arange(n, dtype=float)
+        totals = [max(sum(t.get(k, 0) for k in keys), 1) for t in sorted_trend]
+
+        self._trend_plot.clear()
+
+        bottoms = np.zeros(n)
+        for key, color in zip(keys, bar_colors):
+            heights = np.array([
+                t.get(key, 0) / totals[i] * 100
+                for i, t in enumerate(sorted_trend)
+            ])
+            bar = pg.BarGraphItem(
+                x=xs, y0=bottoms, height=heights, width=0.7,
+                brush=pg.mkBrush(QColor(color)), pen=pg.mkPen(None),
+            )
+            self._trend_plot.addItem(bar)
+            bottoms = bottoms + heights
+
+        x_ticks = [
+            (i, labels_map.get(t.get("period", ""), t.get("period", "")))
+            for i, t in enumerate(sorted_trend)
+        ]
+        self._trend_plot.getAxis("bottom").setTicks([x_ticks])
+        self._trend_plot.setYRange(0, 100, padding=0.02)
+        self._trend_plot.setXRange(-0.5, n - 0.5, padding=0)
+
+        # Price overlay: dotted amber line at ~40% opacity, scaled to 0–100
+        price_data = [p for p in data.get("_price_3mo", []) if p is not None]
+        if len(price_data) >= 2:
+            base = price_data[0]
+            if base:
+                pct_vals = [(p / base - 1) * 100 for p in price_data]
+                vmin = min(pct_vals)
+                vmax = max(pct_vals)
+                rng  = (vmax - vmin) if vmax != vmin else 1.0
+                scaled = [(v - vmin) / rng * 100 for v in pct_vals]
+                px = np.linspace(0, n - 1, len(scaled))
+                overlay_color = QColor(C_AMB)
+                overlay_color.setAlpha(100)
+                pen = pg.mkPen(
+                    color=overlay_color, width=2,
+                    style=Qt.PenStyle.DotLine,
+                )
+                self._trend_plot.plot(px, scaled, pen=pen)
 
 
 # ── Tab 4: Peers ─────────────────────────────────────────────────────────────

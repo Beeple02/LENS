@@ -374,12 +374,15 @@ async def _fetch_timeseries_data(
     period2 = int(_time.time())
     period1 = period2 - 5 * 365 * 24 * 3600
     url = _BASE_TIMESERIES.format(ticker=ticker)
+    crumb = await _ensure_crumb(c)
     params: dict[str, Any] = {
         "period1": period1,
         "period2": period2,
         "merge": "false",
         "type": ",".join(fields),
     }
+    if crumb:
+        params["crumb"] = crumb
     try:
         data = await _get(c, url, params)
     except Exception:
