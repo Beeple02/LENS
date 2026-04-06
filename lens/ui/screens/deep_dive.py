@@ -728,7 +728,10 @@ class _AnalystsTab(_BaseTab):
         self._fill_consensus(data)
         self._fill_targets(data)
         self._fill_ratings(data)
-        self._draw_consensus_trend(data)
+        try:
+            self._draw_consensus_trend(data)
+        except Exception:
+            pass  # chart draw failure must not block content display
         self._show_content()
 
     def _fill_consensus(self, data: dict) -> None:
@@ -856,8 +859,14 @@ class _AnalystsTab(_BaseTab):
                                   symbolPen=pg.mkPen(None))
 
         self._trend_plot.getAxis("bottom").setTicks([x_ticks])
-        self._trend_plot.setYRange(0, None, padding=0.1)
         self._trend_plot.setXRange(-0.3, n - 0.7, padding=0)
+        # Compute y-max from data and set range explicitly (pyqtgraph rejects None)
+        all_pcts = [
+            t.get(k, 0) / totals[i] * 100
+            for i, t in enumerate(sorted_trend) for k in keys
+        ]
+        y_top = max(all_pcts) if all_pcts else 60.0
+        self._trend_plot.setYRange(0, y_top * 1.15, padding=0)
 
         # Price overlay: dotted amber line at ~40% opacity, scaled to analyst % range
         price_data = [p for p in data.get("_price_3mo", []) if p is not None]
