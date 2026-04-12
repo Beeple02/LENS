@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,13 +33,18 @@ SMA_PERIODS = [20, 50, 200]
 
 
 class ChartScreen(QWidget):
+    open_quote     = pyqtSignal(str)
+    open_deep_dive = pyqtSignal(str)
+
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self._config = config
         self._ticker: Optional[str] = None
         self._current_interval = INTERVALS[4]  # default 1Y
         self._worker = None
+        self._events_worker = None
         self._mode = "candles"
+        self._events_active = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -121,6 +126,18 @@ class ChartScreen(QWidget):
         log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
         tb_layout.addWidget(log_btn)
 
+        sep5 = QFrame()
+        sep5.setFrameShape(QFrame.Shape.VLine)
+        sep5.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep5)
+
+        self._events_btn = QPushButton("EVENTS")
+        self._events_btn.setProperty("class", "interval-btn")
+        self._events_btn.setCheckable(True)
+        self._events_btn.setToolTip("Toggle earnings & ECB event overlay")
+        self._events_btn.clicked.connect(self._on_events_toggled)
+        tb_layout.addWidget(self._events_btn)
+
         tb_layout.addStretch()
 
         self._ticker_label = QLabel()
@@ -135,6 +152,9 @@ class ChartScreen(QWidget):
         # Chart
         self._chart = ChartWidget()
         self._chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._chart.open_quote.connect(self.open_quote)
+        self._chart.open_deep_dive.connect(self.open_deep_dive)
+        self._chart.interval_change_requested.connect(self._set_interval)
         layout.addWidget(self._chart)
 
         self._placeholder = QLabel("Enter a ticker above to load a chart")
@@ -150,6 +170,7 @@ class ChartScreen(QWidget):
         self._ticker = ticker.upper()
         self._ticker_input.setText(self._ticker)
         self._ticker_label.setText(self._ticker)
+        self._chart.set_ticker(self._ticker)
         self._fetch_chart()
 
     def _on_ticker_enter(self) -> None:
@@ -163,6 +184,7 @@ class ChartScreen(QWidget):
             self._current_interval = iv
             for i, (lbl, *_) in enumerate(INTERVALS):
                 self._iv_btns[i].setChecked(lbl == label)
+            self._chart.set_current_interval_label(label)
             if self._ticker:
                 self._fetch_chart()
 
@@ -199,3 +221,22 @@ class ChartScreen(QWidget):
     def _on_error(self, msg: str) -> None:
         self._placeholder.setText(f"Error loading chart: {msg[:80]}")
         self._placeholder.show()
+
+    def _on_events_toggled(self, checked: bool) -> None:
+        self._events_active = checked
+        if checked and self._ticker:
+            from lens.ui.workers import FetchTickerEventsWorker
+            if self._events_worker and self._events_worker.isRunning():
+                return
+            self._events_worker = FetchTickerEventsWorker(self._ticker, self)
+            self._events_worker.events_ready.connect(self._on_events_ready)
+            self._events_worker.start()
+        else:
+            self._chart.toggle_events(False)
+
+    def _on_events_ready(self, data: dict) -> None:
+        self._chart.set_events_data(
+            data.get("earnings_past", []),
+            data.get("earnings_next"),
+        )
+        self._chart.toggle_events(self._events_active)

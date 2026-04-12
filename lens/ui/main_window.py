@@ -29,14 +29,15 @@ _TABS_FILE = Path.home() / ".lens" / "tabs.json"
 
 # Screen types available from the + menu
 _SCREEN_TYPES = [
-    ("HOMEPAGE",         "homepage"),
-    ("QUOTE",            "quote"),
-    ("CHART",            "chart"),
-    ("PORTFOLIO",        "portfolio"),
-    ("SCREENER",         "screener"),
-    ("MACRO DASHBOARD",  "macro"),
-    ("SETTINGS",         "settings"),
-    ("DEVLOGS",          "devlogs"),
+    ("HOMEPAGE",           "homepage"),
+    ("QUOTE",              "quote"),
+    ("CHART",              "chart"),
+    ("PORTFOLIO",          "portfolio"),
+    ("SCREENER",           "screener"),
+    ("MACRO DASHBOARD",    "macro"),
+    ("ECONOMIC CALENDAR",  "calendar"),
+    ("SETTINGS",           "settings"),
+    ("DEVLOGS",            "devlogs"),
 ]
 
 _DEFAULT_TABS = [
@@ -359,13 +360,22 @@ class MainWindow(QMainWindow):
             from lens.ui.screens.quote import QuoteScreen
             screen = QuoteScreen(self._config)
             screen.open_deep_dive.connect(self.open_deep_dive_tab)
+            screen.open_quote.connect(self._open_quote_from_ticker)
             return screen
         if screen_type == "deep_dive":
             from lens.ui.screens.deep_dive import DeepDiveScreen
             return DeepDiveScreen(self._config)
         if screen_type == "chart":
             from lens.ui.screens.chart import ChartScreen
-            return ChartScreen(self._config)
+            screen = ChartScreen(self._config)
+            screen.open_quote.connect(self._open_quote_from_ticker)
+            screen.open_deep_dive.connect(self.open_deep_dive_tab)
+            return screen
+        if screen_type == "calendar":
+            from lens.ui.screens.calendar import EconomicCalendarScreen
+            screen = EconomicCalendarScreen(self._config)
+            screen.open_quote.connect(self._open_quote_from_ticker)
+            return screen
         if screen_type == "portfolio":
             from lens.ui.screens.portfolio import PortfolioScreen
             return PortfolioScreen(self._config)
@@ -397,7 +407,7 @@ class MainWindow(QMainWindow):
         save: bool = True,
     ) -> int:
         # Singleton screens — reuse existing tab instead of opening a second one
-        if screen_type in ("macro",):
+        if screen_type in ("macro", "calendar"):
             for i, tab in enumerate(self._tab_data):
                 if tab["type"] == screen_type:
                     if activate:

@@ -1258,6 +1258,341 @@ class _OwnershipTab(_BaseTab):
         self._show_content()
 
 
+# ── Tab 7: ESG ───────────────────────────────────────────────────────────────
+
+def _esg_color(score: Optional[float]) -> str:
+    if score is None:
+        return C_DIM
+    if score < 20:
+        return "#22c55e"   # low risk — green
+    if score < 30:
+        return "#f59e0b"   # medium — amber
+    if score < 40:
+        return "#f97316"   # high — orange
+    return "#ef4444"       # severe — red
+
+
+def _ordinal(n: int) -> str:
+    if 11 <= (n % 100) <= 13:
+        return f"{n}th"
+    return f"{n}{['th','st','nd','rd','th','th','th','th','th','th'][n % 10]}"
+
+
+class _ESGPeerBar(QWidget):
+    """Horizontal peer-range bar with a company dot."""
+
+    def __init__(self, label: str, parent=None) -> None:
+        super().__init__(parent)
+        self._label = label
+        self._peer_min = self._peer_avg = self._peer_max = None
+        self._company = None
+        self.setFixedHeight(42)
+
+    def set_data(self, peer_min, peer_avg, peer_max, company) -> None:
+        self._peer_min = peer_min
+        self._peer_avg = peer_avg
+        self._peer_max = peer_max
+        self._company  = company
+        self.update()
+
+    def paintEvent(self, _evt) -> None:
+        from PyQt6.QtGui import QPainter, QPen, QBrush, QFont
+        from PyQt6.QtCore import QRectF, QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+        bar_y  = h * 0.68
+        bar_h  = 8
+        lbl_y  = int(h * 0.22)
+
+        # Label
+        p.setPen(QColor(C_DIM))
+        f = QFont("Consolas", 8, QFont.Weight.Bold)
+        p.setFont(f)
+        p.drawText(0, lbl_y, self._label)
+
+        pm = self._peer_min
+        pM = self._peer_max
+        if pm is None or pM is None or pm == pM:
+            p.end()
+            return
+
+        # Background bar (full range)
+        pad = 8
+        bar_w = w - 2 * pad
+        p.fillRect(QRectF(pad, bar_y - bar_h / 2, bar_w, bar_h), QColor("#222222"))
+
+        def _x(v):
+            return pad + (v - pm) / (pM - pm) * bar_w
+
+        # Peer range shading
+        x_min = _x(pm)
+        x_max = _x(pM)
+        p.fillRect(QRectF(x_min, bar_y - bar_h / 2, x_max - x_min, bar_h), QColor("#333333"))
+
+        # Peer avg tick
+        if self._peer_avg is not None:
+            xa = _x(self._peer_avg)
+            p.setPen(QPen(QColor("#888888"), 2))
+            p.drawLine(QPointF(xa, bar_y - bar_h), QPointF(xa, bar_y + bar_h))
+
+        # Company dot
+        if self._company is not None:
+            xc = _x(max(pm, min(pM, self._company)))
+            dot_r = 5
+            color = QColor(_esg_color(self._company))
+            p.setBrush(QBrush(color))
+            p.setPen(QPen(color.darker(120), 1))
+            p.drawEllipse(QPointF(xc, bar_y), dot_r, dot_r)
+
+        p.end()
+
+
+class _ESGTab(_BaseTab):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        c_lay = QVBoxLayout(self._content)
+        c_lay.setContentsMargins(0, 0, 0, 0)
+        c_lay.addWidget(scroll)
+
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+        scroll.setWidget(inner)
+
+        # "No data" label (shown when ESG data unavailable)
+        self._no_data_lbl = QLabel("ESG data not available for this security.")
+        self._no_data_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._no_data_lbl.setStyleSheet("color: #555555; font-size: 13px; padding: 40px;")
+        self._no_data_lbl.hide()
+        lay.addWidget(self._no_data_lbl)
+
+        # ── Score cards row ─────────────────────────────────────────────
+        scores_frame = QFrame()
+        scores_frame.setProperty("class", "panel")
+        scores_row = QHBoxLayout(scores_frame)
+        scores_row.setContentsMargins(16, 12, 16, 12)
+        scores_row.setSpacing(8)
+
+        self._total_val  = QLabel("—")
+        self._env_val    = QLabel("—")
+        self._soc_val    = QLabel("—")
+        self._gov_val    = QLabel("—")
+
+        for val_lbl, title in (
+            (self._total_val, "TOTAL ESG RISK"),
+            (self._env_val,   "ENVIRONMENT"),
+            (self._soc_val,   "SOCIAL"),
+            (self._gov_val,   "GOVERNANCE"),
+        ):
+            col = QVBoxLayout()
+            val_lbl.setStyleSheet(
+                "font-family: Consolas, monospace; font-size: 28px; "
+                "font-weight: 700; color: #555555;"
+            )
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title_lbl = QLabel(title)
+            title_lbl.setStyleSheet(
+                "font-size: 9px; font-weight: 700; color: #555555; letter-spacing: 0.5px;"
+            )
+            title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(val_lbl)
+            col.addWidget(title_lbl)
+            scores_row.addLayout(col)
+            if title != "GOVERNANCE":
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.VLine)
+                sep.setStyleSheet("color: #1e1e1e;")
+                scores_row.addWidget(sep)
+        lay.addWidget(scores_frame)
+
+        # ── Performance badge + percentile ─────────────────────────────
+        badge_frame = QFrame()
+        badge_frame.setProperty("class", "panel")
+        badge_row = QHBoxLayout(badge_frame)
+        badge_row.setContentsMargins(16, 10, 16, 10)
+        badge_row.setSpacing(16)
+
+        self._perf_badge = QLabel("—")
+        self._perf_badge.setFixedWidth(170)
+        self._perf_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._perf_badge.setStyleSheet(
+            "font-family: Consolas; font-size: 12px; font-weight: 700; "
+            "padding: 4px 10px; border-radius: 3px; background: #222222; color: #888888;"
+        )
+        badge_row.addWidget(self._perf_badge)
+
+        self._pct_lbl = QLabel()
+        self._pct_lbl.setStyleSheet("font-size: 13px; color: #c8c8c8;")
+        badge_row.addWidget(self._pct_lbl)
+
+        self._peer_group_lbl = QLabel()
+        self._peer_group_lbl.setStyleSheet("font-size: 11px; color: #555555;")
+        badge_row.addWidget(self._peer_group_lbl)
+        badge_row.addStretch()
+        lay.addWidget(badge_frame)
+
+        # ── Peer comparison bars ────────────────────────────────────────
+        bars_frame = QFrame()
+        bars_frame.setProperty("class", "panel")
+        bars_lay = QVBoxLayout(bars_frame)
+        bars_lay.setContentsMargins(16, 12, 16, 12)
+        bars_lay.setSpacing(6)
+        bars_hdr = QLabel("PEER COMPARISON")
+        bars_hdr.setProperty("class", "section-header")
+        bars_lay.addWidget(bars_hdr)
+
+        bars_grid = QHBoxLayout()
+        bars_grid.setSpacing(12)
+        self._bar_total = _ESGPeerBar("TOTAL ESG")
+        self._bar_env   = _ESGPeerBar("ENVIRONMENT")
+        self._bar_soc   = _ESGPeerBar("SOCIAL")
+        self._bar_gov   = _ESGPeerBar("GOVERNANCE")
+        for bar in (self._bar_total, self._bar_env, self._bar_soc, self._bar_gov):
+            bars_grid.addWidget(bar)
+        bars_lay.addLayout(bars_grid)
+        lay.addWidget(bars_frame)
+
+        # ── Rating info footer ──────────────────────────────────────────
+        footer_frame = QFrame()
+        footer_frame.setProperty("class", "panel")
+        footer_lay = QVBoxLayout(footer_frame)
+        footer_lay.setContentsMargins(16, 8, 16, 8)
+
+        self._rated_lbl = QLabel()
+        self._rated_lbl.setStyleSheet("font-size: 11px; color: #555555;")
+        self._controversy_lbl = QLabel()
+        self._controversy_lbl.setStyleSheet("font-size: 11px; color: #555555;")
+        footer_lay.addWidget(self._rated_lbl)
+        footer_lay.addWidget(self._controversy_lbl)
+        lay.addWidget(footer_frame)
+
+        lay.addStretch()
+
+        self._scores_frame     = scores_frame
+        self._badge_frame      = badge_frame
+        self._bars_frame       = bars_frame
+        self._footer_frame     = footer_frame
+
+    def on_data(self, esg: dict) -> None:
+        if not esg:
+            self._no_data_lbl.show()
+            self._scores_frame.hide()
+            self._badge_frame.hide()
+            self._bars_frame.hide()
+            self._footer_frame.hide()
+            self._show_content()
+            return
+
+        self._no_data_lbl.hide()
+        self._scores_frame.show()
+        self._badge_frame.show()
+        self._bars_frame.show()
+        self._footer_frame.show()
+
+        def _rv(obj):
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get("raw")
+            return obj
+
+        total = _rv(esg.get("totalEsg"))
+        env   = _rv(esg.get("environmentScore"))
+        soc   = _rv(esg.get("socialScore"))
+        gov   = _rv(esg.get("governanceScore"))
+
+        for val_lbl, score in (
+            (self._total_val, total),
+            (self._env_val,   env),
+            (self._soc_val,   soc),
+            (self._gov_val,   gov),
+        ):
+            if score is not None:
+                color = _esg_color(score)
+                val_lbl.setText(f"{score:.1f}")
+                val_lbl.setStyleSheet(
+                    f"font-family: Consolas, monospace; font-size: 28px; "
+                    f"font-weight: 700; color: {color};"
+                )
+            else:
+                val_lbl.setText("—")
+
+        # Performance badge
+        perf = esg.get("esgPerformance", "")
+        if perf == "OUT_PERF":
+            badge_text = "OUTPERFORMER"
+            badge_style = "background: #14532d; color: #22c55e;"
+        elif perf == "UNDER_PERF":
+            badge_text = "UNDERPERFORMER"
+            badge_style = "background: #450a0a; color: #ef4444;"
+        else:
+            badge_text = "AVERAGE PERFORMER"
+            badge_style = "background: #451a03; color: #f59e0b;"
+        self._perf_badge.setText(badge_text)
+        self._perf_badge.setStyleSheet(
+            f"font-family: Consolas; font-size: 12px; font-weight: 700; "
+            f"padding: 4px 10px; border-radius: 3px; {badge_style}"
+        )
+
+        # Percentile
+        pctile = esg.get("percentile")
+        if pctile is not None:
+            self._pct_lbl.setText(f"SECTOR PERCENTILE: {_ordinal(int(pctile))}")
+
+        peer_group = esg.get("peerGroup", "")
+        peer_count = esg.get("peerCount", 0)
+        if peer_group:
+            self._peer_group_lbl.setText(f"Peer group: {peer_group} ({peer_count} companies)")
+
+        # Peer bars
+        def _peer_triple(key):
+            obj = esg.get(key) or {}
+            return (
+                _rv(obj.get("min")),
+                _rv(obj.get("avg")),
+                _rv(obj.get("max")),
+            )
+
+        pm, pa, pM = _peer_triple("peerEsgScorePerformance")
+        self._bar_total.set_data(pm, pa, pM, total)
+        pm, pa, pM = _peer_triple("peerEnvironmentPerformance")
+        self._bar_env.set_data(pm, pa, pM, env)
+        pm, pa, pM = _peer_triple("peerSocialPerformance")
+        self._bar_soc.set_data(pm, pa, pM, soc)
+        pm, pa, pM = _peer_triple("peerGovernancePerformance")
+        self._bar_gov.set_data(pm, pa, pM, gov)
+
+        # Rating footer
+        yr = esg.get("ratingYear")
+        mo = esg.get("ratingMonth")
+        if yr:
+            self._rated_lbl.setText(
+                f"Rated by Sustainalytics · {mo}/{yr}" if mo else f"Rated by Sustainalytics · {yr}"
+            )
+        controversy = esg.get("highestControversy")
+        if controversy is not None:
+            if controversy <= 1:
+                c_color = "#22c55e"
+            elif controversy <= 3:
+                c_color = "#f59e0b"
+            else:
+                c_color = "#ef4444"
+            self._controversy_lbl.setText(
+                f'Controversy level: <span style="color:{c_color};font-weight:700;">'
+                f'{controversy}</span>/5'
+            )
+            self._controversy_lbl.setTextFormat(Qt.TextFormat.RichText)
+
+        self._show_content()
+
+
 # ── DeepDiveScreen ───────────────────────────────────────────────────────────
 
 class DeepDiveScreen(QWidget):
@@ -1286,6 +1621,7 @@ class DeepDiveScreen(QWidget):
         self._peer = _PeersTab()
         self._div  = _DividendsTab()
         self._own  = _OwnershipTab()
+        self._esg  = _ESGTab()
 
         self._tabs.addTab(self._fin,  "Financials")
         self._tabs.addTab(self._earn, "Earnings")
@@ -1293,6 +1629,7 @@ class DeepDiveScreen(QWidget):
         self._tabs.addTab(self._peer, "Peers")
         self._tabs.addTab(self._div,  "Dividends")
         self._tabs.addTab(self._own,  "Ownership")
+        self._tabs.addTab(self._esg,  "ESG")
 
     def load_ticker(self, ticker: str) -> None:
         import logging
@@ -1319,6 +1656,7 @@ class DeepDiveScreen(QWidget):
         self._worker.dividends_ready.connect(self._div.on_data)
         self._worker.ownership_ready.connect(self._own.on_data)
         self._worker.peers_ready.connect(self._peer.on_data)
+        self._worker.esg_ready.connect(self._esg.on_data)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
@@ -1333,6 +1671,7 @@ class DeepDiveScreen(QWidget):
             "dividends":  self._div,
             "ownership":  self._own,
             "peers":      self._peer,
+            "esg":        self._esg,
         }
         target = tab_map.get(tab)
         if target:

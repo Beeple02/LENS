@@ -6,9 +6,9 @@ from typing import Any, Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QMenu, QSizePolicy, QVBoxLayout, QWidget
 
 # Palette
 C_BG      = "#0a0a0a"
@@ -22,6 +22,24 @@ C_NEG     = "#ef4444"
 C_GRAY    = "#555555"
 
 pg.setConfigOptions(antialias=True, foreground=C_TEXT, background=C_BG)
+
+# ECB Governing Council meeting dates 2025-2026 (hardcoded)
+_ECB_DATES = [
+    "2025-01-30", "2025-03-06", "2025-04-17", "2025-06-05",
+    "2025-07-24", "2025-09-11", "2025-10-30", "2025-12-18",
+    "2026-01-29", "2026-03-05", "2026-04-16", "2026-06-04",
+    "2026-07-23", "2026-09-10", "2026-10-29", "2026-12-17",
+]
+
+_INTERVALS = [
+    ("1D",  "5m",  "1d"),
+    ("1W",  "1h",  "5d"),
+    ("1M",  "1d",  "1mo"),
+    ("3M",  "1d",  "3mo"),
+    ("1Y",  "1d",  "1y"),
+    ("5Y",  "1wk", "5y"),
+    ("MAX", "1wk", "max"),
+]
 
 
 def _hex(color: str) -> QColor:
@@ -48,8 +66,6 @@ class CandlestickItem(pg.GraphicsObject):
 
         w = 0.4   # half candle body width in data units
 
-        # Cosmetic pens are always 1px wide in SCREEN pixels regardless of zoom
-        # — without this, pen widths in data units become sub-pixel and invisible
         def _cpen(color: QColor, width: float = 1.0) -> QPen:
             pen = QPen(color, width)
             pen.setCosmetic(True)
@@ -70,12 +86,10 @@ class CandlestickItem(pg.GraphicsObject):
             body_bot = min(o, c)
             body_h   = max(body_top - body_bot, 0.0001)
 
-            # Wicks — 1px cosmetic, drawn only outside the body
             p.setPen(_cpen(color, 1.0))
             p.drawLine(pg.Point(i, l),        pg.Point(i, body_bot))
             p.drawLine(pg.Point(i, body_top), pg.Point(i, h))
 
-            # Body — hollow green outline for bullish, solid red fill for bearish
             if bullish:
                 p.setPen(_cpen(color, 1.5))
                 p.setBrush(QBrush(_Qt.BrushStyle.NoBrush))
@@ -113,16 +127,33 @@ class ChartWidget(QWidget):
     - Volume sub-chart
     - SMA overlays (20/50/200)
     - Crosshair with OHLCV tooltip
+    - Right-click context menu
+    - EVENTS overlay (earnings + ECB meeting dates)
     - Dark-themed, amber accents
     """
+
+    # Signals for cross-screen navigation
+    open_quote             = pyqtSignal(str)   # ticker
+    open_deep_dive         = pyqtSignal(str)   # ticker
+    interval_change_requested = pyqtSignal(str)  # interval label e.g. "1Y"
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._data: list[dict[str, Any]] = []
         self._dates: list[str] = []
-        self._mode: str = "candles"   # "candles" or "line"
+        self._mode: str = "candles"
         self._sma: set[int] = set()
         self._show_volume: bool = True
+
+        # Context menu state
+        self._ticker: Optional[str] = None
+        self._current_interval_label: str = "1Y"
+
+        # Events overlay state
+        self._events_active: bool = False
+        self._earnings_past: list[str] = []
+        self._earnings_next: Optional[str] = None
+        self._event_items: list = []   # InfiniteLine + TextItem objects
 
         self._setup_ui()
 
@@ -173,6 +204,9 @@ class ChartWidget(QWidget):
             slot=self._on_mouse_moved,
         )
 
+        # Right-click context menu
+        self._price_plot.scene().sigMouseClicked.connect(self._on_scene_clicked)
+
         # Placeholder items
         self._candle_item: Optional[CandlestickItem] = None
         self._line_item: Optional[pg.PlotDataItem] = None
@@ -189,11 +223,23 @@ class ChartWidget(QWidget):
         plot.setMenuEnabled(False)
         plot.hideButtons()
 
+    # ── Public setters ─────────────────────────────────────────────────────
+
+    def set_ticker(self, ticker: str) -> None:
+        self._ticker = ticker.upper() if ticker else None
+
+    def set_current_interval_label(self, label: str) -> None:
+        self._current_interval_label = label
+
+    # ── Data loading ───────────────────────────────────────────────────────
+
     def load_data(self, data: list[dict[str, Any]]) -> None:
         """Load OHLCV data and redraw."""
         self._data = [d for d in data if d.get("close")]
         self._dates = [d["date"] for d in self._data]
         self._redraw()
+        if self._events_active:
+            self._draw_event_lines()
 
     def set_mode(self, mode: str) -> None:
         """Switch between 'candles' and 'line'."""
@@ -210,6 +256,208 @@ class ChartWidget(QWidget):
             self._sma.add(period)
         self._redraw_smas()
 
+    # ── EVENTS overlay ─────────────────────────────────────────────────────
+
+    def set_events_data(
+        self,
+        earnings_past: list[str],
+        earnings_next: Optional[str],
+    ) -> None:
+        """Store event dates; call toggle_events(True) to draw them."""
+        self._earnings_past = earnings_past or []
+        self._earnings_next = earnings_next
+        if self._events_active:
+            self._draw_event_lines()
+
+    def toggle_events(self, enabled: bool) -> None:
+        self._events_active = enabled
+        self._clear_event_items()
+        if enabled and self._data:
+            self._draw_event_lines()
+
+    def _clear_event_items(self) -> None:
+        for item in self._event_items:
+            try:
+                self._price_plot.removeItem(item)
+            except Exception:
+                pass
+        self._event_items = []
+
+    def _draw_event_lines(self) -> None:
+        self._clear_event_items()
+        if not self._dates:
+            return
+
+        date_to_idx: dict[str, int] = {d: i for i, d in enumerate(self._dates)}
+
+        # Earnings past — dim amber dashed line
+        for ds in self._earnings_past:
+            idx = date_to_idx.get(ds)
+            if idx is None:
+                # nearest available date
+                for i, d in enumerate(self._dates):
+                    if d >= ds:
+                        idx = i
+                        break
+            if idx is not None:
+                pen = pg.mkPen(color=QColor(C_AMB), width=1,
+                               style=Qt.PenStyle.DashLine)
+                pen.setColor(QColor(245, 158, 11, 100))
+                line = pg.InfiniteLine(pos=float(idx), angle=90, movable=False, pen=pen)
+                self._price_plot.addItem(line, ignoreBounds=True)
+                self._event_items.append(line)
+                lbl = pg.TextItem("E", color=QColor(245, 158, 11, 130), anchor=(0.5, 1.0))
+                vr = self._price_plot.viewRange()
+                lbl.setPos(float(idx), vr[1][1] if vr else 0)
+                lbl.setFont(pg.QtGui.QFont("Consolas", 8))
+                self._price_plot.addItem(lbl, ignoreBounds=True)
+                self._event_items.append(lbl)
+
+        # Next earnings — bright amber
+        if self._earnings_next:
+            # find closest future date in chart
+            idx = None
+            for i, d in enumerate(self._dates):
+                if d >= self._earnings_next:
+                    idx = i
+                    break
+            if idx is None and self._dates:
+                idx = len(self._dates) - 1
+            if idx is not None:
+                pen = pg.mkPen(color=QColor(C_AMB), width=1.5,
+                               style=Qt.PenStyle.DashLine)
+                line = pg.InfiniteLine(pos=float(idx), angle=90, movable=False, pen=pen)
+                self._price_plot.addItem(line, ignoreBounds=True)
+                self._event_items.append(line)
+                lbl = pg.TextItem("E↑", color=QColor(C_AMB), anchor=(0.5, 1.0))
+                vr = self._price_plot.viewRange()
+                lbl.setPos(float(idx), vr[1][1] if vr else 0)
+                lbl.setFont(pg.QtGui.QFont("Consolas", 8, weight=pg.QtGui.QFont.Weight.Bold))
+                self._price_plot.addItem(lbl, ignoreBounds=True)
+                self._event_items.append(lbl)
+
+        # ECB dates — gray dashed
+        for ds in _ECB_DATES:
+            if not self._dates or ds < self._dates[0] or ds > self._dates[-1]:
+                continue
+            idx = date_to_idx.get(ds)
+            if idx is None:
+                for i, d in enumerate(self._dates):
+                    if d >= ds:
+                        idx = i
+                        break
+            if idx is not None:
+                pen = pg.mkPen(color=QColor("#444444"), width=1,
+                               style=Qt.PenStyle.DashLine)
+                line = pg.InfiniteLine(pos=float(idx), angle=90, movable=False, pen=pen)
+                self._price_plot.addItem(line, ignoreBounds=True)
+                self._event_items.append(line)
+                lbl = pg.TextItem("ECB", color=QColor("#666666"), anchor=(0.5, 1.0))
+                vr = self._price_plot.viewRange()
+                lbl.setPos(float(idx), vr[1][1] if vr else 0)
+                lbl.setFont(pg.QtGui.QFont("Consolas", 7))
+                self._price_plot.addItem(lbl, ignoreBounds=True)
+                self._event_items.append(lbl)
+
+    # ── Right-click context menu ───────────────────────────────────────────
+
+    def _on_scene_clicked(self, evt) -> None:
+        if evt.button() != Qt.MouseButton.RightButton:
+            return
+        # Only handle clicks inside the price plot
+        if not self._price_plot.sceneBoundingRect().contains(evt.scenePos()):
+            return
+        evt.accept()
+        self._show_context_menu(evt.screenPos().toPoint())
+
+    def _show_context_menu(self, pos) -> None:
+        ticker = self._ticker or ""
+        menu = QMenu(self)
+
+        # — Navigation ——————————————————————————————————————————————
+        if ticker:
+            act_quote = menu.addAction(f"Open Quote  →  {ticker}")
+            act_quote.triggered.connect(lambda: self.open_quote.emit(ticker))
+
+            act_dd = menu.addAction(f"Open Deep Dive  →  {ticker}")
+            act_dd.triggered.connect(lambda: self.open_deep_dive.emit(ticker))
+
+        # — Watchlist submenu ——————————————————————————————————————
+        wl_menu = menu.addMenu("Add to Watchlist")
+        if ticker:
+            try:
+                from lens.db.store import list_watchlists, add_to_watchlist, upsert_security, create_watchlist
+                wls = list_watchlists()
+                if wls:
+                    for wl in wls:
+                        wl_name = wl["name"]
+                        act = wl_menu.addAction(wl_name)
+                        def _add_handler(checked, name=wl_name):
+                            try:
+                                upsert_security(ticker=ticker, name=ticker)
+                                add_to_watchlist(name, ticker)
+                                self._show_status(f"✓ Added {ticker} to {name}")
+                            except Exception:
+                                pass
+                        act.triggered.connect(_add_handler)
+                else:
+                    no_wl = wl_menu.addAction("No watchlists found")
+                    no_wl.setEnabled(False)
+            except Exception:
+                err_act = wl_menu.addAction("Could not load watchlists")
+                err_act.setEnabled(False)
+        else:
+            no_t = wl_menu.addAction("No ticker loaded")
+            no_t.setEnabled(False)
+
+        menu.addSeparator()
+
+        # — Copy ———————————————————————————————————————————————————
+        act_copy_ticker = menu.addAction("Copy Ticker")
+        act_copy_ticker.setEnabled(bool(ticker))
+        act_copy_ticker.triggered.connect(lambda: QApplication.clipboard().setText(ticker))
+
+        last_price = self._data[-1]["close"] if self._data else None
+        act_copy_price = menu.addAction(
+            f"Copy Current Price  ({last_price:,.4f})" if last_price else "Copy Current Price"
+        )
+        act_copy_price.setEnabled(last_price is not None)
+        if last_price is not None:
+            act_copy_price.triggered.connect(
+                lambda: QApplication.clipboard().setText(str(last_price))
+            )
+
+        menu.addSeparator()
+
+        # — Interval submenu ———————————————————————————————————————
+        iv_menu = menu.addMenu("Interval")
+        for label, *_ in _INTERVALS:
+            act = iv_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(label == self._current_interval_label)
+            act.triggered.connect(
+                lambda checked, lbl=label: self.interval_change_requested.emit(lbl)
+            )
+
+        # — SMA submenu ————————————————————————————————————————————
+        sma_menu = menu.addMenu("SMA Overlays")
+        for period in (20, 50, 200):
+            act = sma_menu.addAction(f"SMA {period}")
+            act.setCheckable(True)
+            act.setChecked(period in self._sma)
+            act.triggered.connect(
+                lambda checked, p=period: self.toggle_sma(p, p not in self._sma)
+            )
+
+        menu.exec(pos)
+
+    def _show_status(self, msg: str) -> None:
+        """Briefly show a status message in the OHLCV label area."""
+        self._ohlcv_label.setText(msg)
+        QTimer.singleShot(2500, lambda: self._ohlcv_label.setText(""))
+
+    # ── Drawing ────────────────────────────────────────────────────────────
+
     def _redraw(self) -> None:
         if not self._data:
             return
@@ -223,12 +471,12 @@ class ChartWidget(QWidget):
         self._price_plot.addItem(self._hline, ignoreBounds=True)
         self._price_plot.addItem(self._ohlcv_label, ignoreBounds=True)
         self._sma_items = {}
+        self._event_items = []
 
         if self._mode == "candles" and len(self._data) <= 500:
             self._candle_item = CandlestickItem(self._data)
             self._price_plot.addItem(self._candle_item)
         else:
-            # Line chart
             pen = pg.mkPen(C_AMB, width=1.5)
             self._line_item = self._price_plot.plot(xs, closes, pen=pen)
 
@@ -255,8 +503,6 @@ class ChartWidget(QWidget):
 
         self._redraw_smas()
 
-        # Explicitly set view ranges — autoRange() doesn't reliably pick up
-        # custom GraphicsObject items like CandlestickItem
         lows  = np.array([d.get("low")  or d["close"] for d in self._data], dtype=float)
         highs = np.array([d.get("high") or d["close"] for d in self._data], dtype=float)
         vols  = np.array([d.get("volume") or 0        for d in self._data], dtype=float)
@@ -270,7 +516,6 @@ class ChartWidget(QWidget):
             self._vol_plot.setYRange(0, vols.max() * 1.15, padding=0)
 
     def _redraw_smas(self) -> None:
-        # Remove old SMA lines
         for item in self._sma_items.values():
             self._price_plot.removeItem(item)
         self._sma_items = {}
@@ -337,6 +582,5 @@ class ChartWidget(QWidget):
             )
             self._ohlcv_label.setText(label)
 
-            # Position label in top-left of visible range
             vr = self._price_plot.viewRange()
             self._ohlcv_label.setPos(vr[0][0], vr[1][1])

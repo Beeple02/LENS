@@ -262,6 +262,7 @@ class QuoteScreen(QWidget):
     """Full-screen quote deep-dive."""
 
     open_deep_dive = pyqtSignal(str)  # emits ticker to open DeepDive tab
+    open_quote     = pyqtSignal(str)  # emits ticker for cross-screen navigation
 
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
@@ -269,6 +270,8 @@ class QuoteScreen(QWidget):
         self._ticker: Optional[str] = None
         self._current_interval = ("1M", "1d", "1mo")
         self._workers: list = []
+        self._events_worker = None
+        self._events_active = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -340,6 +343,16 @@ class QuoteScreen(QWidget):
         log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
         iv_layout.addWidget(log_btn)
 
+        iv_layout.addSpacing(8)
+
+        # Events overlay toggle
+        self._events_btn = QPushButton("EVENTS")
+        self._events_btn.setProperty("class", "interval-btn")
+        self._events_btn.setCheckable(True)
+        self._events_btn.setToolTip("Toggle earnings & ECB event overlay")
+        self._events_btn.clicked.connect(self._on_events_toggled)
+        iv_layout.addWidget(self._events_btn)
+
         iv_layout.addStretch()
         top_layout.addWidget(iv_frame)
         layout.addWidget(top_row)
@@ -352,6 +365,9 @@ class QuoteScreen(QWidget):
         self._chart = ChartWidget()
         self._chart.setMinimumHeight(300)
         self._chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._chart.open_quote.connect(self.open_quote)
+        self._chart.open_deep_dive.connect(self.open_deep_dive)
+        self._chart.interval_change_requested.connect(self._set_interval)
         layout.addWidget(self._chart)
 
         # Fundamentals scroll area
@@ -381,6 +397,8 @@ class QuoteScreen(QWidget):
 
     def load_ticker(self, ticker: str) -> None:
         self._ticker = ticker.upper()
+        self._chart.set_ticker(self._ticker)
+        self._chart.set_current_interval_label(self._current_interval[0])
         self._load_all()
 
     def on_show(self) -> None:
@@ -451,6 +469,7 @@ class QuoteScreen(QWidget):
             # Uncheck all interval buttons and check the selected one
             for i, (lbl, *_) in enumerate(INTERVALS):
                 self._iv_buttons[i].setChecked(lbl == label)
+            self._chart.set_current_interval_label(label)
             self._load_chart()
 
     def _set_mode(self, mode: str) -> None:
@@ -459,3 +478,22 @@ class QuoteScreen(QWidget):
         modes = ["candles", "line"]
         for j, m in enumerate(modes):
             self._iv_buttons[len(INTERVALS) + j].setChecked(m == mode)
+
+    def _on_events_toggled(self, checked: bool) -> None:
+        self._events_active = checked
+        if checked and self._ticker:
+            from lens.ui.workers import FetchTickerEventsWorker
+            if self._events_worker and self._events_worker.isRunning():
+                return
+            self._events_worker = FetchTickerEventsWorker(self._ticker, self)
+            self._events_worker.events_ready.connect(self._on_events_ready)
+            self._events_worker.start()
+        else:
+            self._chart.toggle_events(False)
+
+    def _on_events_ready(self, data: dict) -> None:
+        self._chart.set_events_data(
+            data.get("earnings_past", []),
+            data.get("earnings_next"),
+        )
+        self._chart.toggle_events(self._events_active)
