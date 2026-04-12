@@ -29,13 +29,14 @@ _TABS_FILE = Path.home() / ".lens" / "tabs.json"
 
 # Screen types available from the + menu
 _SCREEN_TYPES = [
-    ("HOMEPAGE",  "homepage"),
-    ("QUOTE",     "quote"),
-    ("CHART",     "chart"),
-    ("PORTFOLIO", "portfolio"),
-    ("SCREENER",  "screener"),
-    ("SETTINGS",  "settings"),
-    ("DEVLOGS",   "devlogs"),
+    ("HOMEPAGE",         "homepage"),
+    ("QUOTE",            "quote"),
+    ("CHART",            "chart"),
+    ("PORTFOLIO",        "portfolio"),
+    ("SCREENER",         "screener"),
+    ("MACRO DASHBOARD",  "macro"),
+    ("SETTINGS",         "settings"),
+    ("DEVLOGS",          "devlogs"),
 ]
 
 _DEFAULT_TABS = [
@@ -374,6 +375,9 @@ class MainWindow(QMainWindow):
         if screen_type == "settings":
             from lens.ui.screens.settings import SettingsScreen
             return SettingsScreen(self._config)
+        if screen_type == "macro":
+            from lens.ui.screens.macro import MacroScreen
+            return MacroScreen(self._config)
         if screen_type == "devlogs":
             from lens.ui.screens.devlogs import DevLogsScreen
             return DevLogsScreen(self._config)
@@ -392,6 +396,15 @@ class MainWindow(QMainWindow):
         activate: bool = True,
         save: bool = True,
     ) -> int:
+        # Singleton screens — reuse existing tab instead of opening a second one
+        if screen_type in ("macro",):
+            for i, tab in enumerate(self._tab_data):
+                if tab["type"] == screen_type:
+                    if activate:
+                        self._tab_bar.set_active(i)
+                        self._on_tab_changed(i)
+                    return i
+
         if label is None:
             label = screen_type.upper()
         if tab_id is None:

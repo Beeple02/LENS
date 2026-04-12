@@ -1,4 +1,4 @@
-"""Screener screen — DSL filter + results table."""
+"""Screener screen — DSL filter + presets + saved screens + results table."""
 
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTextEdit,
@@ -57,6 +60,16 @@ Examples:
   pb < 2 AND debt_equity < 1 AND current_ratio > 1.5
 """
 
+# Built-in presets — not deletable
+_BUILTIN_PRESETS: list[tuple[str, str]] = [
+    ("Cheap Quality",    "pe < 15 AND roe > 0.15 AND debt_equity < 1"),
+    ("High Dividend",    "div_yield > 0.04 AND payout_ratio < 0.7 AND market_cap > 5e8"),
+    ("Deep Value",       "pb < 1 AND pe < 12 AND current_ratio > 1.5"),
+    ("Growth",           "revenue_growth > 0.15 AND roe > 0.12"),
+    ("Low Debt",         "debt_equity < 0.3 AND current_ratio > 2"),
+    ("Momentum Quality", "revenue_growth > 0.1 AND net_margin > 0.1 AND pb < 5"),
+]
+
 
 def _fmt(v, decimals=1):
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -80,13 +93,24 @@ class ScreenerScreen(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Filter bar
+        # ── Filter bar ────────────────────────────────────────────────────
         filter_bar = QFrame()
         filter_bar.setProperty("class", "panel")
         filter_bar.setFixedHeight(52)
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(12, 8, 12, 8)
         filter_layout.setSpacing(8)
+
+        # PRESETS button
+        self._presets_btn = QPushButton("PRESETS ▾")
+        self._presets_btn.setFixedWidth(100)
+        self._presets_btn.setStyleSheet(
+            "QPushButton { background: #111111; color: #c8c8c8; border: 1px solid #2a2a2a; "
+            "font-size: 11px; font-weight: 600; padding: 2px 8px; }"
+            "QPushButton:hover { background: #1a1a1a; border-color: #f59e0b; color: #f59e0b; }"
+        )
+        self._presets_btn.clicked.connect(self._show_presets_menu)
+        filter_layout.addWidget(self._presets_btn)
 
         filter_lbl = QLabel("Filter:")
         filter_lbl.setStyleSheet("color: #f59e0b; font-weight: 600; font-size: 12px;")
@@ -99,6 +123,17 @@ class ScreenerScreen(QWidget):
         )
         self._filter_input.returnPressed.connect(self._run_screen)
         filter_layout.addWidget(self._filter_input)
+
+        # SAVE button
+        save_btn = QPushButton("SAVE ✦")
+        save_btn.setFixedWidth(80)
+        save_btn.setStyleSheet(
+            "QPushButton { background: #111111; color: #c8c8c8; border: 1px solid #2a2a2a; "
+            "font-size: 11px; font-weight: 600; padding: 2px 8px; }"
+            "QPushButton:hover { background: #1a1a1a; border-color: #f59e0b; color: #f59e0b; }"
+        )
+        save_btn.clicked.connect(self._save_screen)
+        filter_layout.addWidget(save_btn)
 
         universe_lbl = QLabel("Universe:")
         universe_lbl.setStyleSheet("color: #666666; font-size: 12px;")
@@ -117,7 +152,7 @@ class ScreenerScreen(QWidget):
 
         layout.addWidget(filter_bar)
 
-        # Status bar
+        # ── Status bar ────────────────────────────────────────────────────
         status_frame = QFrame()
         status_frame.setFixedHeight(24)
         status_layout = QHBoxLayout(status_frame)
@@ -127,7 +162,7 @@ class ScreenerScreen(QWidget):
         status_layout.addWidget(self._status_label)
         layout.addWidget(status_frame)
 
-        # Splitter: table | help panel
+        # ── Splitter: table | help ─────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
 
@@ -140,7 +175,6 @@ class ScreenerScreen(QWidget):
         self._table.cellDoubleClicked.connect(self._on_double_click)
         splitter.addWidget(self._table)
 
-        # Help panel
         help_frame = QFrame()
         help_frame.setProperty("class", "panel")
         help_frame.setFixedWidth(280)
@@ -163,8 +197,109 @@ class ScreenerScreen(QWidget):
 
         self._load_watchlists()
 
+    # ── On-show ───────────────────────────────────────────────────────────
+
     def on_show(self) -> None:
         self._load_watchlists()
+
+    # ── Presets ───────────────────────────────────────────────────────────
+
+    def _show_presets_menu(self) -> None:
+        menu = QMenu(self)
+
+        for name, expr in _BUILTIN_PRESETS:
+            action = menu.addAction(name)
+            action.triggered.connect(self._make_preset_handler(expr))
+
+        menu.addSeparator()
+
+        try:
+            from lens.db.store import get_saved_screens
+            saved = get_saved_screens()
+        except Exception:
+            saved = []
+
+        if saved:
+            for row in saved:
+                action = menu.addAction(f"★  {row['name']}")
+                action.triggered.connect(self._make_preset_handler(row["expression"]))
+                action.setData(row["name"])
+            menu.addSeparator()
+            del_menu = menu.addMenu("Delete saved screen…")
+            for row in saved:
+                da = del_menu.addAction(row["name"])
+                da.triggered.connect(self._make_delete_handler(row["name"]))
+        else:
+            no_saved = menu.addAction("No saved screens yet")
+            no_saved.setEnabled(False)
+
+        menu.exec(self._presets_btn.mapToGlobal(
+            self._presets_btn.rect().bottomLeft()
+        ))
+
+    def _make_preset_handler(self, expr: str):
+        def _handler():
+            self._filter_input.setText(expr)
+            self._run_screen()
+        return _handler
+
+    def _make_delete_handler(self, name: str):
+        def _handler():
+            reply = QMessageBox.question(
+                self,
+                "Delete screen",
+                f"Delete saved screen '{name}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    from lens.db.store import delete_screen
+                    delete_screen(name)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Error", str(exc))
+        return _handler
+
+    # ── Save screen ───────────────────────────────────────────────────────
+
+    def _save_screen(self) -> None:
+        expr = self._filter_input.text().strip()
+        if not expr:
+            self._status_label.setText("Nothing to save — enter a filter first")
+            self._status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+            return
+
+        name, ok = QInputDialog.getText(self, "Save screen", "Name this screen:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        # Check for overwrite
+        try:
+            from lens.db.store import get_saved_screens
+            existing = {r["name"] for r in get_saved_screens()}
+        except Exception:
+            existing = set()
+
+        if name in existing:
+            reply = QMessageBox.question(
+                self,
+                "Overwrite?",
+                f"A screen named '{name}' already exists. Overwrite?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            from lens.db.store import save_screen
+            save_screen(name, expr)
+            self._status_label.setText(f"Saved as '{name}'")
+            self._status_label.setStyleSheet("color: #22c55e; font-size: 11px;")
+        except Exception as exc:
+            self._status_label.setText(f"Save failed: {exc}")
+            self._status_label.setStyleSheet("color: #ef4444; font-size: 11px;")
+
+    # ── Run / results ─────────────────────────────────────────────────────
 
     def _load_watchlists(self) -> None:
         from lens.db.store import list_watchlists
@@ -175,7 +310,6 @@ class ScreenerScreen(QWidget):
             self._universe_combo.addItem("All Securities", "all")
             for wl in wls:
                 self._universe_combo.addItem(wl["name"], wl["name"])
-            # Restore selection
             idx = self._universe_combo.findData(current)
             if idx >= 0:
                 self._universe_combo.setCurrentIndex(idx)
