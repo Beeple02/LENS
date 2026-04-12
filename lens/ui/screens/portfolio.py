@@ -374,9 +374,70 @@ class AnalyticsTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        layout = QHBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root_lay = QVBoxLayout(self)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
+
+        # ── Row 1: 6 stat cards ──────────────────────────────────────────
+        cards_frame = QFrame()
+        cards_frame.setProperty("class", "panel")
+        cards_row = QHBoxLayout(cards_frame)
+        cards_row.setContentsMargins(12, 8, 12, 8)
+        cards_row.setSpacing(4)
+
+        self._beta_card     = StatCard("PORTFOLIO BETA",     "—")
+        self._sharpe_card   = StatCard("SHARPE RATIO",       "—")
+        self._sortino_card  = StatCard("SORTINO RATIO",      "—")
+        self._maxdd_card    = StatCard("MAX DRAWDOWN",       "—")
+        self._vol_card      = StatCard("ANNUALISED VOL",     "—")
+        self._best_m_card   = StatCard("BEST MONTH",         "—")
+        self._worst_m_card  = StatCard("WORST MONTH",        "—")
+
+        for card in (self._beta_card, self._sharpe_card, self._sortino_card,
+                     self._maxdd_card, self._vol_card,
+                     self._best_m_card, self._worst_m_card):
+            cards_row.addWidget(card)
+        layout.addWidget(cards_frame)
+
+        # ── Row 2: drawdown chart ─────────────────────────────────────────
+        dd_frame = QFrame()
+        dd_frame.setProperty("class", "panel")
+        dd_lay = QVBoxLayout(dd_frame)
+        dd_lay.setContentsMargins(12, 8, 12, 8)
+        dd_lay.setSpacing(4)
+        dd_hdr = QLabel("DRAWDOWN FROM PEAK")
+        dd_hdr.setProperty("class", "section-header")
+        dd_lay.addWidget(dd_hdr)
+
+        import pyqtgraph as pg
+        self._dd_plot = pg.PlotWidget()
+        self._dd_plot.setBackground("#000000")
+        self._dd_plot.setMinimumHeight(120)
+        self._dd_plot.showAxis("top", False)
+        self._dd_plot.showAxis("right", False)
+        for side in ("left", "bottom"):
+            ax = self._dd_plot.getAxis(side)
+            ax.setTextPen(pg.mkPen("#555555"))
+            ax.setPen(pg.mkPen("#222222"))
+            ax.setStyle(tickFont=pg.QtGui.QFont("Consolas", 8))
+        self._dd_plot.setMenuEnabled(False)
+        self._dd_plot.hideButtons()
+        dd_lay.addWidget(self._dd_plot)
+        dd_frame.setFixedHeight(160)
+        layout.addWidget(dd_frame)
+
+        # ── Row 3: existing left+right panels ────────────────────────────
+        lower_row = QHBoxLayout()
+        lower_row.setSpacing(10)
 
         # Left: sector bars
         left = QFrame()
@@ -393,28 +454,37 @@ class AnalyticsTab(QWidget):
         self._sector_layout.setSpacing(8)
         left_layout.addWidget(self._sector_widget)
         left_layout.addStretch()
-        layout.addWidget(left, 1)
+        lower_row.addWidget(left, 1)
 
         # Right: benchmark + heatmap
         right = QVBoxLayout()
 
-        # Benchmark
+        # Benchmark — now with 6 cards (3 original + 3 new)
         bm_frame = QFrame()
         bm_frame.setProperty("class", "panel")
         bm_layout = QVBoxLayout(bm_frame)
         bm_layout.setContentsMargins(12, 8, 12, 8)
-        bm_hdr = QLabel("BENCHMARK COMPARISON")
+        bm_hdr = QLabel("BENCHMARK COMPARISON  (^FCHI CAC 40)")
         bm_hdr.setProperty("class", "section-header")
         bm_layout.addWidget(bm_hdr)
 
-        bm_row = QHBoxLayout()
+        bm_row1 = QHBoxLayout()
         self._bm_portfolio_card = StatCard("Portfolio TWR")
         self._bm_bench_card     = StatCard("Benchmark Return")
         self._bm_alpha_card     = StatCard("Alpha")
-        bm_row.addWidget(self._bm_portfolio_card)
-        bm_row.addWidget(self._bm_bench_card)
-        bm_row.addWidget(self._bm_alpha_card)
-        bm_layout.addLayout(bm_row)
+        bm_row1.addWidget(self._bm_portfolio_card)
+        bm_row1.addWidget(self._bm_bench_card)
+        bm_row1.addWidget(self._bm_alpha_card)
+        bm_layout.addLayout(bm_row1)
+
+        bm_row2 = QHBoxLayout()
+        self._bm_corr_card  = StatCard("Correlation")
+        self._bm_upcap_card = StatCard("Up Capture")
+        self._bm_dncap_card = StatCard("Down Capture")
+        bm_row2.addWidget(self._bm_corr_card)
+        bm_row2.addWidget(self._bm_upcap_card)
+        bm_row2.addWidget(self._bm_dncap_card)
+        bm_layout.addLayout(bm_row2)
         right.addWidget(bm_frame)
 
         # Monthly heatmap
@@ -435,7 +505,12 @@ class AnalyticsTab(QWidget):
 
         right_widget = QWidget()
         right_widget.setLayout(right)
-        layout.addWidget(right_widget, 1)
+        lower_row.addWidget(right_widget, 1)
+
+        lower_widget = QWidget()
+        lower_widget.setLayout(lower_row)
+        layout.addWidget(lower_widget)
+        layout.addStretch()
 
     def update_sectors(self, sectors: list[dict]) -> None:
         # Clear
@@ -488,6 +563,88 @@ class AnalyticsTab(QWidget):
             "#22c55e" if (bench and bench >= 0) else "#ef4444" if bench else None)
         self._bm_alpha_card.set_value(pct_str(alpha),
             "#22c55e" if (alpha and alpha >= 0) else "#ef4444" if alpha else None)
+
+    def update_analytics_metrics(self, data: dict) -> None:
+        """Update all new stat cards + drawdown chart from FetchAnalyticsWorker output."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        def _pct(v, decimals=1):
+            if v is None:
+                return "—"
+            sign = "+" if v >= 0 else ""
+            return f"{sign}{v * 100:.{decimals}f}%"
+
+        def _num(v, decimals=2):
+            if v is None:
+                return "—"
+            sign = "+" if v >= 0 else ""
+            return f"{sign}{v:.{decimals}f}"
+
+        beta = data.get("beta")
+        self._beta_card.set_value(
+            f"β {beta:.2f}" if beta is not None else "—",
+            "#f59e0b" if beta is not None else None,
+        )
+        sharpe = data.get("sharpe")
+        self._sharpe_card.set_value(
+            _num(sharpe), "#22c55e" if (sharpe and sharpe > 0) else "#ef4444" if sharpe else None
+        )
+        sortino = data.get("sortino")
+        self._sortino_card.set_value(
+            _num(sortino), "#22c55e" if (sortino and sortino > 0) else "#ef4444" if sortino else None
+        )
+        maxdd = data.get("max_drawdown")
+        self._maxdd_card.set_value(
+            _pct(maxdd) if maxdd is not None else "—",
+            "#ef4444" if maxdd is not None else None,
+        )
+        vol = data.get("volatility")
+        self._vol_card.set_value(
+            f"{vol * 100:.1f}%" if vol is not None else "—",
+            "#f59e0b" if vol is not None else None,
+        )
+        self._best_m_card.set_value(data.get("best_month") or "—", "#22c55e")
+        self._worst_m_card.set_value(data.get("worst_month") or "—", "#ef4444")
+
+        # Extended benchmark cards (populated from analytics worker too)
+        corr = data.get("correlation")
+        self._bm_corr_card.set_value(f"{corr:.2f}" if corr is not None else "—")
+        upcap = data.get("up_capture")
+        self._bm_upcap_card.set_value(
+            f"{upcap:.0f}%" if upcap is not None else "—",
+            "#22c55e" if (upcap and upcap >= 100) else "#f59e0b" if upcap else None,
+        )
+        dncap = data.get("down_capture")
+        self._bm_dncap_card.set_value(
+            f"{dncap:.0f}%" if dncap is not None else "—",
+            "#22c55e" if (dncap and dncap <= 100) else "#ef4444" if dncap else None,
+        )
+
+        # Drawdown chart
+        dd_series = data.get("drawdown_series", [])
+        if dd_series:
+            xs = np.arange(len(dd_series), dtype=float)
+            ys = np.array([v for _, v in dd_series], dtype=float)
+            self._dd_plot.clear()
+            pen = pg.mkPen(color="#ef4444", width=1.5)
+            self._dd_plot.plot(xs, ys, pen=pen)
+            # Red fill under the line
+            fill = pg.FillBetweenItem(
+                self._dd_plot.plot(xs, ys, pen=pg.mkPen(None)),
+                self._dd_plot.plot(xs, np.zeros_like(ys), pen=pg.mkPen(None)),
+                brush=pg.mkBrush(239, 68, 68, 60),
+            )
+            self._dd_plot.addItem(fill)
+            # Zero line
+            self._dd_plot.addLine(y=0, pen=pg.mkPen("#333333", width=1))
+            # X ticks: sample ~6 dates
+            dates = [d for d, _ in dd_series]
+            step = max(1, len(dates) // 6)
+            ticks = [(float(i), dates[i][:7]) for i in range(0, len(dates), step)]
+            self._dd_plot.getAxis("bottom").setTicks([ticks])
+            y_min = float(np.min(ys))
+            self._dd_plot.setYRange(y_min * 1.1, 0.02, padding=0)
 
     def update_heatmap(self, monthly: dict) -> None:
         # Clear
@@ -542,6 +699,7 @@ class PortfolioScreen(QWidget):
         self._config = config
         self._worker = None
         self._bm_worker = None
+        self._analytics_worker = None
 
         from lens.config import Config
         self._account = Config().default_account
@@ -621,6 +779,8 @@ class PortfolioScreen(QWidget):
 
         # Benchmark
         self._load_benchmark()
+        # Analytics
+        self._load_analytics()
 
     def _load_benchmark(self) -> None:
         from lens.ui.workers import FetchBenchmarkWorker
@@ -631,6 +791,19 @@ class PortfolioScreen(QWidget):
         self._bm_worker = FetchBenchmarkWorker(self._account, "^FCHI", self)
         self._bm_worker.result.connect(self._analytics_tab.update_benchmark)
         self._bm_worker.start()
+
+    def _load_analytics(self) -> None:
+        from lens.ui.workers import FetchAnalyticsWorker
+
+        if self._analytics_worker and self._analytics_worker.isRunning():
+            return
+
+        self._analytics_worker = FetchAnalyticsWorker(self._account, self)
+        self._analytics_worker.analytics_ready.connect(
+            self._analytics_tab.update_analytics_metrics
+        )
+        self._analytics_worker.error.connect(lambda e: None)
+        self._analytics_worker.start()
 
     def _open_quote(self, ticker: str) -> None:
         mw = self.window()

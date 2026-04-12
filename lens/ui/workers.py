@@ -522,6 +522,7 @@ class FetchDeepDiveWorker(QThread):
     dividends_ready  = pyqtSignal(dict)   # quoteSummary + chart_events
     ownership_ready  = pyqtSignal(dict)   # raw quoteSummary result dict
     peers_ready      = pyqtSignal(dict)   # {target, tickers, data, sector, industry}
+    esg_ready        = pyqtSignal(dict)   # esgScores or empty dict
     error            = pyqtSignal(str, str)  # (tab_name, message)
 
     def __init__(self, ticker: str, parent: Any = None) -> None:
@@ -662,9 +663,19 @@ class FetchDeepDiveWorker(QThread):
                         _log.error("DeepDive peers failed — %s: %s", self.ticker, e)
                         self.error.emit("peers", str(e))
 
+                async def _esg() -> None:
+                    try:
+                        d = await _fetch_summary_modules(self.ticker, "esgScores", c)
+                        esg = d.get("esgScores") or {}
+                        self.esg_ready.emit(esg if esg else {})
+                        _log.debug("DeepDive ESG ready — %s", self.ticker)
+                    except Exception as e:
+                        _log.error("DeepDive ESG failed — %s: %s", self.ticker, e)
+                        self.esg_ready.emit({})
+
                 await asyncio.gather(
                     _financials(), _earnings(), _analysts(),
-                    _dividends(), _ownership(), _peers(),
+                    _dividends(), _ownership(), _peers(), _esg(),
                 )
                 _log.info("DeepDive fetch complete — %s", self.ticker)
 
@@ -796,4 +807,364 @@ class FetchMacroWorker(QThread):
             _run(_main())
         except Exception as e:
             _log.error("FetchMacroWorker crashed: %s", e)
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Analytics worker — portfolio risk/return metrics from NAV time-series
+# ---------------------------------------------------------------------------
+
+class FetchAnalyticsWorker(QThread):
+    """Compute portfolio analytics from transaction history + price DB."""
+
+    analytics_ready = pyqtSignal(dict)
+    error           = pyqtSignal(str)
+
+    def __init__(self, account_name: str, parent: Any = None) -> None:
+        super().__init__(parent)
+        self.account_name = account_name
+
+    def run(self) -> None:
+        try:
+            import numpy as np
+            from lens.db.store import get_transactions, get_prices
+            from lens.data.yahoo import get_chart
+
+            txs = get_transactions(self.account_name)
+            if not txs:
+                self.analytics_ready.emit({})
+                return
+
+            txs_sorted = sorted(txs, key=lambda t: t["date"])
+            tickers = list({t["ticker"] for t in txs_sorted})
+
+            price_map: dict[str, dict[str, float]] = {}
+            for ticker in tickers:
+                df = get_prices(ticker)
+                if not df.empty and "date" in df.columns and "close" in df.columns:
+                    price_map[ticker] = dict(zip(df["date"], df["close"].astype(float)))
+
+            if not price_map:
+                self.analytics_ready.emit({})
+                return
+
+            start = txs_sorted[0]["date"][:10]
+            all_dates = sorted({d for s in price_map.values() for d in s if d >= start})
+            if not all_dates:
+                self.analytics_ready.emit({})
+                return
+
+            holdings: dict[str, float] = {}
+            tx_idx = 0
+            nav_series: list[tuple[str, float]] = []
+
+            for d in all_dates:
+                while tx_idx < len(txs_sorted) and txs_sorted[tx_idx]["date"][:10] <= d:
+                    tx = txs_sorted[tx_idx]
+                    ticker = tx["ticker"]
+                    qty = float(tx["quantity"])
+                    tx_type = str(tx["type"]).upper()
+                    if tx_type == "BUY":
+                        holdings[ticker] = holdings.get(ticker, 0.0) + qty
+                    elif tx_type == "SELL":
+                        holdings[ticker] = max(0.0, holdings.get(ticker, 0.0) - qty)
+                    elif tx_type == "SPLIT":
+                        holdings[ticker] = holdings.get(ticker, 0.0) * qty
+                    tx_idx += 1
+
+                nav = 0.0
+                for ticker, shares in holdings.items():
+                    if shares > 0 and ticker in price_map:
+                        candidates = [v for k, v in price_map[ticker].items() if k <= d]
+                        if candidates:
+                            nav += shares * candidates[-1]
+                if nav > 0:
+                    nav_series.append((d, nav))
+
+            if len(nav_series) < 2:
+                self.analytics_ready.emit({})
+                return
+
+            nav_dates = [x[0] for x in nav_series]
+            nav_vals  = np.array([x[1] for x in nav_series], dtype=float)
+
+            # Drawdown series (always computed, full history)
+            peak = np.maximum.accumulate(nav_vals)
+            dd_arr = (nav_vals - peak) / peak
+            drawdown_series = list(zip(nav_dates, dd_arr.tolist()))
+            max_drawdown = float(np.min(dd_arr))
+
+            # Daily portfolio returns
+            nav_ret_all = np.diff(nav_vals) / nav_vals[:-1]
+            ret_dates   = nav_dates[1:]
+
+            # Monthly compound returns for best/worst
+            monthly_rets: dict[str, list[float]] = {}
+            for i, r in enumerate(nav_ret_all):
+                ym = ret_dates[i][:7]
+                monthly_rets.setdefault(ym, []).append(float(r))
+
+            monthly_compound: dict[str, float] = {}
+            for ym, rets in monthly_rets.items():
+                c = 1.0
+                for r in rets:
+                    c *= 1.0 + r
+                monthly_compound[ym] = c - 1.0
+
+            best_month = worst_month = None
+            if monthly_compound:
+                best_ym  = max(monthly_compound, key=lambda k: monthly_compound[k])
+                worst_ym = min(monthly_compound, key=lambda k: monthly_compound[k])
+                _mnames  = ["Jan","Feb","Mar","Apr","May","Jun",
+                            "Jul","Aug","Sep","Oct","Nov","Dec"]
+
+                def _mfmt(ym: str) -> str:
+                    y, m = ym.split("-")
+                    return f"{_mnames[int(m)-1]} {y}"
+
+                bv = monthly_compound[best_ym]
+                wv = monthly_compound[worst_ym]
+                best_month  = f"+{bv*100:.1f}% ({_mfmt(best_ym)})"
+                worst_month = f"{wv*100:.1f}% ({_mfmt(worst_ym)})"
+
+            result: dict = {
+                "max_drawdown":    max_drawdown,
+                "drawdown_series": drawdown_series,
+                "best_month":      best_month,
+                "worst_month":     worst_month,
+            }
+
+            # Risk metrics: last 252 days, minimum 60 days
+            n = min(252, len(nav_ret_all))
+            if n < 60:
+                result.update({"beta": None, "sharpe": None, "sortino": None,
+                               "volatility": None, "correlation": None,
+                               "up_capture": None, "down_capture": None})
+            else:
+                ret_n = nav_ret_all[-n:]
+                rf    = 0.03 / 252
+                mean_r = float(np.mean(ret_n))
+                std_r  = float(np.std(ret_n, ddof=1))
+                result["volatility"] = float(std_r * np.sqrt(252))
+                result["sharpe"] = float((mean_r - rf) / std_r * np.sqrt(252)) if std_r > 0 else None
+                down_only = ret_n[ret_n < 0]
+                down_std  = float(np.std(down_only, ddof=1)) if len(down_only) > 1 else 0.0
+                result["sortino"] = float((mean_r - rf) / down_std * np.sqrt(252)) if down_std > 0 else None
+
+                # Benchmark-aligned metrics: beta, correlation, up/down capture
+                bm_raw = _run(get_chart("^FCHI", "1d", "5y"))
+                bm_map: dict[str, float] = {}
+                if bm_raw:
+                    for bar in bm_raw:
+                        if bar.get("close") and bar.get("date"):
+                            bm_map[bar["date"]] = float(bar["close"])
+
+                aligned_p: list[float] = []
+                aligned_b: list[float] = []
+                for i in range(1, len(nav_series)):
+                    d_prev, nav_prev = nav_series[i - 1]
+                    d_curr, nav_curr = nav_series[i]
+                    bm_prev = bm_map.get(d_prev)
+                    bm_curr = bm_map.get(d_curr)
+                    if bm_prev and bm_curr and bm_prev > 0 and nav_prev > 0:
+                        aligned_p.append((nav_curr - nav_prev) / nav_prev)
+                        aligned_b.append((bm_curr - bm_prev) / bm_prev)
+
+                if len(aligned_p) >= 60:
+                    p = np.array(aligned_p[-252:])
+                    b = np.array(aligned_b[-252:])
+                    var_b  = float(np.var(b, ddof=1))
+                    cov_pb = float(np.cov(p, b)[0, 1])
+                    result["beta"]        = float(cov_pb / var_b) if var_b > 0 else None
+                    result["correlation"] = float(np.corrcoef(p, b)[0, 1]) if len(p) > 1 else None
+
+                    # Monthly up/down capture
+                    mp: dict[str, list[float]] = {}
+                    mb: dict[str, list[float]] = {}
+                    for i, rp in enumerate(aligned_p):
+                        d = nav_series[i + 1][0] if i + 1 < len(nav_series) else ""
+                        ym = d[:7]
+                        if ym:
+                            mp.setdefault(ym, []).append(rp)
+                            mb.setdefault(ym, []).append(aligned_b[i])
+
+                    def _cmpd(rets: list[float]) -> float:
+                        c = 1.0
+                        for r in rets:
+                            c *= 1.0 + r
+                        return c - 1.0
+
+                    port_m = [_cmpd(mp[ym]) for ym in sorted(mp)]
+                    bm_m   = [_cmpd(mb[ym]) for ym in sorted(mb)]
+
+                    if port_m:
+                        up_p = [port_m[i] for i in range(len(bm_m)) if bm_m[i] >= 0]
+                        up_b = [bm_m[i]   for i in range(len(bm_m)) if bm_m[i] >= 0]
+                        dn_p = [port_m[i] for i in range(len(bm_m)) if bm_m[i] < 0]
+                        dn_b = [bm_m[i]   for i in range(len(bm_m)) if bm_m[i] < 0]
+                        avg_ub = float(np.mean(up_b)) if up_b else 0.0
+                        avg_db = float(np.mean(dn_b)) if dn_b else 0.0
+                        result["up_capture"]   = (float(np.mean(up_p)) / avg_ub * 100) if (up_p and avg_ub != 0) else None
+                        result["down_capture"] = (float(np.mean(dn_p)) / avg_db * 100) if (dn_p and avg_db != 0) else None
+                    else:
+                        result["up_capture"] = result["down_capture"] = None
+                else:
+                    result.update({"beta": None, "correlation": None,
+                                   "up_capture": None, "down_capture": None})
+
+            self.analytics_ready.emit(result)
+        except Exception as e:
+            _log.error("FetchAnalyticsWorker failed: %s", e)
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Ticker events worker — earnings dates for chart overlay
+# ---------------------------------------------------------------------------
+
+class FetchTickerEventsWorker(QThread):
+    """Fetch earnings dates for a single ticker (used for chart overlay)."""
+
+    events_ready = pyqtSignal(dict)   # {earnings_past, earnings_next, ecb_dates}
+    error        = pyqtSignal(str)
+
+    def __init__(self, ticker: str, parent: Any = None) -> None:
+        super().__init__(parent)
+        self.ticker = ticker
+
+    def run(self) -> None:
+        async def _main() -> None:
+            import httpx
+            from lens.data.yahoo import _fetch_summary_modules, _ensure_crumb
+            async with httpx.AsyncClient(timeout=15) as c:
+                await _ensure_crumb(c)
+                d = await _fetch_summary_modules(self.ticker, "calendarEvents", c)
+                cal = d.get("calendarEvents", {}) or {}
+                dates_raw = cal.get("earnings", {}).get("earningsDate", [])
+                from datetime import datetime, timezone as _tz, date as _date
+                today = datetime.now(_tz.utc).date()
+                past: list[str] = []
+                nxt:  Optional[str] = None
+                for ts_obj in dates_raw:
+                    from lens.data.yahoo import _safe_float
+                    ts = _safe_float(ts_obj)
+                    if ts is None:
+                        continue
+                    try:
+                        d_val = datetime.fromtimestamp(ts, tz=_tz.utc).date()
+                        ds = d_val.strftime("%Y-%m-%d")
+                        if d_val <= today:
+                            past.append(ds)
+                        elif nxt is None:
+                            nxt = ds
+                    except Exception:
+                        pass
+                self.events_ready.emit({
+                    "earnings_past": past,
+                    "earnings_next": nxt,
+                })
+
+        try:
+            _run(_main())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Calendar worker — full economic calendar data for EconomicCalendarScreen
+# ---------------------------------------------------------------------------
+
+_ECB_MEETING_DATES = [
+    "2025-01-30", "2025-03-06", "2025-04-17", "2025-06-05",
+    "2025-07-24", "2025-09-11", "2025-10-30", "2025-12-18",
+    "2026-01-29", "2026-03-05", "2026-04-16", "2026-06-04",
+    "2026-07-23", "2026-09-10", "2026-10-29", "2026-12-17",
+]
+
+
+class FetchCalendarWorker(QThread):
+    """Fetch earnings / ECB / dividend events for the calendar screen."""
+
+    calendar_data_ready = pyqtSignal(dict)
+    error               = pyqtSignal(str)
+
+    def run(self) -> None:
+        async def _main() -> None:
+            import httpx
+            from datetime import datetime, timezone as _tz, timedelta
+            from lens.data.yahoo import _fetch_summary_modules, _ensure_crumb, _safe_float, get_chart
+            from lens.db.store import list_watchlists, get_watchlist_tickers
+            from lens.config import Config
+            cfg = Config()
+
+            # Collect tickers from all watchlists
+            wl_tickers: list[str] = []
+            try:
+                for wl in list_watchlists():
+                    for row in get_watchlist_tickers(wl["name"]):
+                        if row["ticker"] not in wl_tickers:
+                            wl_tickers.append(row["ticker"])
+            except Exception:
+                pass
+
+            # Fallback to sample EU universe if watchlists empty
+            if not wl_tickers:
+                wl_tickers = _EU_UNIVERSE[:30]
+
+            today = datetime.now(_tz.utc).date()
+            horizon = today + timedelta(days=60)
+
+            earnings_events: list[dict] = []
+            ex_div_events:   list[dict] = []
+
+            async with httpx.AsyncClient(timeout=15) as c:
+                await _ensure_crumb(c)
+
+                # Process in batches of 5 to avoid rate limiting
+                semaphore = asyncio.Semaphore(5)
+
+                async def _fetch_ticker(ticker: str) -> None:
+                    async with semaphore:
+                        try:
+                            d = await _fetch_summary_modules(ticker, "calendarEvents", c)
+                            cal = (d.get("calendarEvents") or {})
+                            for ts_obj in (cal.get("earnings", {}) or {}).get("earningsDate", []):
+                                ts = _safe_float(ts_obj)
+                                if ts is None:
+                                    continue
+                                try:
+                                    ev_date = datetime.fromtimestamp(ts, tz=_tz.utc).date()
+                                    if today <= ev_date <= horizon:
+                                        earnings_events.append({
+                                            "ticker": ticker,
+                                            "name": ticker,
+                                            "date": ev_date.strftime("%Y-%m-%d"),
+                                        })
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                async def _fetch_divs(ticker: str) -> None:
+                    async with semaphore:
+                        try:
+                            bars = await get_chart(ticker, "1d", "3mo", client=c)
+                            for bar in bars:
+                                if bar.get("date") and bar["date"] >= str(today):
+                                    pass  # dividend events are in chart events, not bars
+                        except Exception:
+                            pass
+
+                await asyncio.gather(*[_fetch_ticker(t) for t in wl_tickers])
+
+            self.calendar_data_ready.emit({
+                "earnings":     earnings_events,
+                "ecb_meetings": _ECB_MEETING_DATES,
+                "ex_dividends": ex_div_events,
+            })
+
+        try:
+            _run(_main())
+        except Exception as e:
+            _log.error("FetchCalendarWorker crashed: %s", e)
             self.error.emit(str(e))
