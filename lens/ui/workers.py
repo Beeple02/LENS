@@ -673,3 +673,127 @@ class FetchDeepDiveWorker(QThread):
         except Exception as e:
             _log.error("FetchDeepDiveWorker crashed — %s: %s", self.ticker, e)
             self.error.emit("general", str(e))
+
+
+# ---------------------------------------------------------------------------
+# Macro dashboard worker — fires each group independently as data arrives
+# ---------------------------------------------------------------------------
+
+class FetchMacroWorker(QThread):
+    """Fetch macro data concurrently; emit each category signal as ready."""
+
+    indices_ready     = pyqtSignal(dict)   # {ticker: quote_dict}
+    fx_ready          = pyqtSignal(dict)
+    commodities_ready = pyqtSignal(dict)
+    ecb_rate_ready    = pyqtSignal(float)
+    charts_ready      = pyqtSignal(dict)   # {ticker: ohlcv_list}
+    error             = pyqtSignal(str)
+
+    # Class-level ECB cache: (rate, fetch_timestamp)
+    _ecb_cache: Optional[tuple[float, float]] = None
+
+    _INDICES    = ["^FCHI", "^GDAXI", "^FTSE", "^AEX", "^IBEX", "^SSMI", "^STOXX50E"]
+    _FX         = ["EURUSD=X", "EURGBP=X", "EURCHF=X", "EURJPY=X", "EURCNH=X"]
+    _COMMS      = ["BZ=F", "TTF=F", "GC=F", "SI=F", "HG=F"]
+    _CHART_TKS  = ["^FCHI", "^GDAXI", "^STOXX50E"]
+
+    def run(self) -> None:
+        async def _main() -> None:
+            import time as _time
+            import httpx
+            from lens.data.yahoo import get_quote, get_chart
+
+            async with httpx.AsyncClient(timeout=15) as c:
+
+                async def _ecb() -> None:
+                    cache = FetchMacroWorker._ecb_cache
+                    if cache and (_time.time() - cache[1]) < 3600:
+                        self.ecb_rate_ready.emit(cache[0])
+                        return
+                    try:
+                        url = (
+                            "https://data-api.ecb.europa.eu/service/data/"
+                            "FM/B.U2.EUR.4F.KR.MRR_FR.LEV?format=jsondata"
+                        )
+                        resp = await c.get(url, headers={"Accept": "application/json"})
+                        resp.raise_for_status()
+                        obs = (
+                            resp.json()["dataSets"][0]["series"]
+                            ["0:0:0:0:0:0"]["observations"]
+                        )
+                        last_key = str(max(int(k) for k in obs.keys()))
+                        rate = float(obs[last_key][0])
+                        FetchMacroWorker._ecb_cache = (rate, _time.time())
+                        self.ecb_rate_ready.emit(rate)
+                    except Exception as exc:
+                        self.error.emit(f"ecb: {exc}")
+
+                async def _indices() -> None:
+                    try:
+                        results = await asyncio.gather(
+                            *[get_quote(t, client=c) for t in self._INDICES],
+                            return_exceptions=True,
+                        )
+                        out = {t: r for t, r in zip(self._INDICES, results)
+                               if not isinstance(r, Exception)}
+                        self.indices_ready.emit(out)
+                    except Exception as exc:
+                        self.error.emit(f"indices: {exc}")
+
+                async def _fx() -> None:
+                    try:
+                        results = await asyncio.gather(
+                            *[get_quote(t, client=c) for t in self._FX],
+                            return_exceptions=True,
+                        )
+                        out = {t: r for t, r in zip(self._FX, results)
+                               if not isinstance(r, Exception)}
+                        self.fx_ready.emit(out)
+                    except Exception as exc:
+                        self.error.emit(f"fx: {exc}")
+
+                async def _commodities() -> None:
+                    try:
+                        results = await asyncio.gather(
+                            *[get_quote(t, client=c) for t in self._COMMS],
+                            return_exceptions=True,
+                        )
+                        out: dict = {}
+                        for t, r in zip(self._COMMS, results):
+                            if isinstance(r, Exception):
+                                if t == "TTF=F":
+                                    try:
+                                        out[t] = await get_quote("NG=F", client=c)
+                                    except Exception:
+                                        pass
+                            elif not (r.get("price") or 0) and t == "TTF=F":
+                                try:
+                                    out[t] = await get_quote("NG=F", client=c)
+                                except Exception:
+                                    out[t] = r
+                            else:
+                                out[t] = r
+                        self.commodities_ready.emit(out)
+                    except Exception as exc:
+                        self.error.emit(f"commodities: {exc}")
+
+                async def _charts() -> None:
+                    try:
+                        results = await asyncio.gather(
+                            *[get_chart(t, interval="1d", range_="1y", client=c)
+                              for t in self._CHART_TKS],
+                            return_exceptions=True,
+                        )
+                        out = {t: r for t, r in zip(self._CHART_TKS, results)
+                               if not isinstance(r, Exception)}
+                        self.charts_ready.emit(out)
+                    except Exception as exc:
+                        self.error.emit(f"charts: {exc}")
+
+                await asyncio.gather(_ecb(), _indices(), _fx(), _commodities(), _charts())
+
+        try:
+            _run(_main())
+        except Exception as e:
+            _log.error("FetchMacroWorker crashed: %s", e)
+            self.error.emit(str(e))

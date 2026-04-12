@@ -448,3 +448,38 @@ def get_watchlist_tickers(
             """,
             (watchlist_name,),
         ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Saved screens
+# ---------------------------------------------------------------------------
+
+def get_saved_screens(db_path: Optional[Path] = None) -> list[dict]:
+    """Return all saved screens ordered by name."""
+    with db_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT name, expression, created_at FROM saved_screens ORDER BY name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_screen(
+    name: str, expression: str, db_path: Optional[Path] = None
+) -> None:
+    """Insert or replace a saved screen."""
+    with db_conn(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO saved_screens (name, expression, created_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(name) DO UPDATE SET expression = excluded.expression,
+                                            created_at = excluded.created_at
+            """,
+            (name, expression),
+        )
+
+
+def delete_screen(name: str, db_path: Optional[Path] = None) -> None:
+    """Delete a saved screen by name."""
+    with db_conn(db_path) as conn:
+        conn.execute("DELETE FROM saved_screens WHERE name = ?", (name,))
