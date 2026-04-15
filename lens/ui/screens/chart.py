@@ -126,6 +126,26 @@ class ChartScreen(QWidget):
         log_btn.clicked.connect(lambda checked: self._chart.set_log_mode(checked))
         tb_layout.addWidget(log_btn)
 
+        sep_ind = QFrame()
+        sep_ind.setFrameShape(QFrame.Shape.VLine)
+        sep_ind.setStyleSheet("color: #222222;")
+        tb_layout.addWidget(sep_ind)
+
+        # Technical indicator toggles
+        for ind_name, ind_tip in (
+            ("BB",   "Bollinger Bands (20, 2σ)"),
+            ("RSI",  "RSI 14"),
+            ("MACD", "MACD 12/26/9"),
+        ):
+            btn = QPushButton(ind_name)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.setToolTip(ind_tip)
+            btn.clicked.connect(
+                lambda checked, n=ind_name.lower(): self._chart.toggle_indicator(n, checked)
+            )
+            tb_layout.addWidget(btn)
+
         sep5 = QFrame()
         sep5.setFrameShape(QFrame.Shape.VLine)
         sep5.setStyleSheet("color: #222222;")

@@ -1167,4 +1167,166 @@ class FetchCalendarWorker(QThread):
             _run(_main())
         except Exception as e:
             _log.error("FetchCalendarWorker crashed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# News worker
+# ---------------------------------------------------------------------------
+
+class FetchNewsWorker(QThread):
+    result = pyqtSignal(list)   # list of dicts: {title, publisher, link, published}
+    error  = pyqtSignal(str)
+
+    def __init__(self, ticker: str = "", parent: Any = None) -> None:
+        super().__init__(parent)
+        self.ticker = ticker   # empty string = market-wide news
+
+    def run(self) -> None:
+        try:
+            data = _run(self._fetch())
+            self.result.emit(data)
+        except Exception as e:
+            _log.error("News fetch failed [%s]: %s", self.ticker, e)
             self.error.emit(str(e))
+
+    async def _fetch(self) -> list:
+        import httpx
+        params: dict = {"count": "30", "lang": "en"}
+        if self.ticker:
+            params["tickers"] = self.ticker
+        else:
+            params["tickers"] = "^FCHI,^GDAXI,^STOXX50E"
+        url = "https://query1.finance.yahoo.com/v2/finance/news"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, params=params, headers=headers)
+            r.raise_for_status()
+            items = r.json().get("items", {}).get("result", [])
+            out = []
+            for it in items:
+                content = it.get("content", {})
+                pub_ts = content.get("pubDate", "")
+                # Format: "2024-01-15T10:30:00Z"
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(pub_ts[:19], "%Y-%m-%dT%H:%M:%S")
+                    pub_str = dt.strftime("%d %b  %H:%M")
+                except Exception:
+                    pub_str = pub_ts[:16]
+                out.append({
+                    "title":     content.get("title", ""),
+                    "publisher": content.get("provider", {}).get("displayName", ""),
+                    "link":      content.get("canonicalUrl", {}).get("url", ""),
+                    "published": pub_str,
+                })
+            return out
+
+
+# ---------------------------------------------------------------------------
+# Alert monitor worker — polls active alerts every N seconds
+# ---------------------------------------------------------------------------
+
+class AlertMonitorWorker(QThread):
+    alert_triggered = pyqtSignal(str, str, float, float)  # ticker, condition, threshold, price
+    error           = pyqtSignal(str)
+
+    POLL_INTERVAL_MS = 30_000   # 30 seconds
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        while not self._stop:
+            try:
+                _run(self._check_alerts())
+            except Exception as e:
+                _log.error("Alert monitor error: %s", e)
+            # Wait in small increments so stop() is responsive
+            for _ in range(self.POLL_INTERVAL_MS // 200):
+                if self._stop:
+                    return
+                import time
+                time.sleep(0.2)
+
+    async def _check_alerts(self) -> None:
+        from lens.db.store import get_active_alerts, mark_alert_triggered
+        alerts = get_active_alerts()
+        if not alerts:
+            return
+        # Group by ticker
+        tickers = list({a["ticker"] for a in alerts})
+        from lens.data.yahoo import get_quote
+        import asyncio
+        quotes = {}
+        for ticker in tickers:
+            try:
+                q = await get_quote(ticker)
+                quotes[ticker] = q.get("price")
+            except Exception:
+                pass
+        for alert in alerts:
+            ticker = alert["ticker"]
+            price = quotes.get(ticker)
+            if price is None:
+                continue
+            cond  = alert["condition_type"]
+            thr   = float(alert["threshold"])
+            triggered = False
+            if cond == "price_above" and price >= thr:
+                triggered = True
+            elif cond == "price_below" and price <= thr:
+                triggered = True
+            if triggered:
+                mark_alert_triggered(alert["id"])
+                self.alert_triggered.emit(ticker, cond, thr, price)
+
+
+# ---------------------------------------------------------------------------
+# Multi-chart worker — fetches OHLCV for multiple tickers in parallel
+# ---------------------------------------------------------------------------
+
+class FetchMultiChartWorker(QThread):
+    series_ready = pyqtSignal(str, list)   # ticker, data
+    all_done     = pyqtSignal()
+    error        = pyqtSignal(str, str)    # ticker, message
+
+    def __init__(
+        self,
+        tickers: list,
+        interval: str = "1d",
+        range_: str = "1y",
+        parent: Any = None,
+    ) -> None:
+        super().__init__(parent)
+        self.tickers  = tickers
+        self.interval = interval
+        self.range_   = range_
+
+    def run(self) -> None:
+        try:
+            _run(self._main())
+        except Exception as e:
+            self.error.emit("", str(e))
+
+    async def _main(self) -> None:
+        from lens.data.yahoo import get_chart
+        import asyncio
+        sem = asyncio.Semaphore(4)
+
+        async def _fetch_one(ticker: str) -> None:
+            async with sem:
+                try:
+                    data = await get_chart(ticker, self.interval, self.range_)
+                    self.series_ready.emit(ticker, data)
+                except Exception as e:
+                    self.error.emit(ticker, str(e))
+
+        await asyncio.gather(*[_fetch_one(t) for t in self.tickers])
+        self.all_done.emit()
