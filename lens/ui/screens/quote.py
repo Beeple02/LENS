@@ -345,6 +345,23 @@ class QuoteScreen(QWidget):
 
         iv_layout.addSpacing(8)
 
+        # Technical indicator toggles
+        for ind_name, ind_tip in (
+            ("BB",   "Bollinger Bands (20, 2σ)"),
+            ("RSI",  "RSI 14"),
+            ("MACD", "MACD 12/26/9"),
+        ):
+            btn = QPushButton(ind_name)
+            btn.setProperty("class", "interval-btn")
+            btn.setCheckable(True)
+            btn.setToolTip(ind_tip)
+            btn.clicked.connect(
+                lambda checked, n=ind_name.lower(): self._chart.toggle_indicator(n, checked)
+            )
+            iv_layout.addWidget(btn)
+
+        iv_layout.addSpacing(8)
+
         # Events overlay toggle
         self._events_btn = QPushButton("EVENTS")
         self._events_btn.setProperty("class", "interval-btn")

@@ -483,3 +483,81 @@ def delete_screen(name: str, db_path: Optional[Path] = None) -> None:
     """Delete a saved screen by name."""
     with db_conn(db_path) as conn:
         conn.execute("DELETE FROM saved_screens WHERE name = ?", (name,))
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
+def get_active_alerts(db_path: Optional[Path] = None) -> list:
+    """Return all non-triggered alerts joined with their ticker."""
+    with db_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, s.ticker, a.condition_type, a.threshold, a.created_at
+            FROM alerts a
+            JOIN securities s ON s.id = a.security_id
+            WHERE a.triggered = 0
+            ORDER BY a.created_at DESC
+            """,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_alerts(db_path: Optional[Path] = None) -> list:
+    """Return all alerts (including triggered) joined with ticker."""
+    with db_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, s.ticker, a.condition_type, a.threshold,
+                   a.triggered, a.created_at
+            FROM alerts a
+            JOIN securities s ON s.id = a.security_id
+            ORDER BY a.created_at DESC
+            """,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_alert(
+    ticker: str,
+    condition_type: str,
+    threshold: float,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Insert a new alert. Returns its id."""
+    with db_conn(db_path) as conn:
+        sec_row = conn.execute(
+            "SELECT id FROM securities WHERE ticker = ?", (ticker,)
+        ).fetchone()
+        if sec_row is None:
+            conn.execute(
+                "INSERT INTO securities (ticker, name) VALUES (?, ?)",
+                (ticker, ticker),
+            )
+            sec_id = conn.execute(
+                "SELECT id FROM securities WHERE ticker = ?", (ticker,)
+            ).fetchone()["id"]
+        else:
+            sec_id = sec_row["id"]
+        conn.execute(
+            """
+            INSERT INTO alerts (security_id, condition_type, threshold)
+            VALUES (?, ?, ?)
+            """,
+            (sec_id, condition_type, threshold),
+        )
+        row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
+        return row["id"]
+
+
+def delete_alert(alert_id: int, db_path: Optional[Path] = None) -> None:
+    with db_conn(db_path) as conn:
+        conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+
+
+def mark_alert_triggered(alert_id: int, db_path: Optional[Path] = None) -> None:
+    with db_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE alerts SET triggered = 1 WHERE id = ?", (alert_id,)
+        )

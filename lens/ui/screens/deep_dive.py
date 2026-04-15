@@ -1631,6 +1631,12 @@ class DeepDiveScreen(QWidget):
         self._tabs.addTab(self._own,  "Ownership")
         self._tabs.addTab(self._esg,  "ESG")
 
+        # News tab
+        from lens.ui.widgets.news_widget import NewsWidget
+        self._news_tab = NewsWidget()
+        self._tabs.addTab(self._news_tab, "News")
+        self._news_worker = None
+
     def load_ticker(self, ticker: str) -> None:
         import logging
         self._ticker = ticker.upper()
@@ -1659,6 +1665,13 @@ class DeepDiveScreen(QWidget):
         self._worker.esg_ready.connect(self._esg.on_data)
         self._worker.error.connect(self._on_error)
         self._worker.start()
+
+        # Fetch news for this ticker independently
+        from lens.ui.workers import FetchNewsWorker
+        self._news_tab.set_loading()
+        self._news_worker = FetchNewsWorker(self._ticker)
+        self._news_worker.result.connect(self._news_tab.load_news)
+        self._news_worker.start()
 
     def _on_header(self, quote: dict) -> None:
         self._header.update_quote(quote)

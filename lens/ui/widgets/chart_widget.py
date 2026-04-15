@@ -42,6 +42,72 @@ _INTERVALS = [
 ]
 
 
+# ── Indicator computation ──────────────────────────────────────────────────
+
+def _compute_rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
+    """Wilder's RSI. Returns array same length as closes; leading values are NaN."""
+    n = len(closes)
+    rsi = np.full(n, np.nan)
+    if n <= period:
+        return rsi
+    deltas = np.diff(closes)
+    gains = np.clip(deltas, 0.0, None)
+    losses = np.clip(-deltas, 0.0, None)
+    avg_g = float(gains[:period].mean())
+    avg_l = float(losses[:period].mean())
+    rs = avg_g / avg_l if avg_l > 0 else float("inf")
+    rsi[period] = 100.0 - 100.0 / (1.0 + rs)
+    for i in range(period, n - 1):
+        avg_g = (avg_g * (period - 1) + float(gains[i])) / period
+        avg_l = (avg_l * (period - 1) + float(losses[i])) / period
+        rs = avg_g / avg_l if avg_l > 0 else float("inf")
+        rsi[i + 1] = 100.0 - 100.0 / (1.0 + rs)
+    return rsi
+
+
+def _compute_macd(
+    closes: np.ndarray,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple:
+    """Returns (macd_line, signal_line, histogram) — all same length as closes."""
+    def _ema(arr: np.ndarray, span: int) -> np.ndarray:
+        alpha = 2.0 / (span + 1.0)
+        out = np.empty(len(arr), dtype=float)
+        out[0] = arr[0]
+        for i in range(1, len(arr)):
+            out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    ema_fast  = _ema(closes, fast)
+    ema_slow  = _ema(closes, slow)
+    macd_line = ema_fast - ema_slow
+    sig_line  = _ema(macd_line, signal)
+    histogram = macd_line - sig_line
+    return macd_line, sig_line, histogram
+
+
+def _compute_bollinger(
+    closes: np.ndarray,
+    period: int = 20,
+    num_std: float = 2.0,
+) -> tuple:
+    """Returns (upper, middle, lower) — leading (period-1) values are NaN."""
+    n = len(closes)
+    upper  = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
+    lower  = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        window = closes[i - period + 1: i + 1]
+        m = float(window.mean())
+        s = float(window.std(ddof=1))
+        middle[i] = m
+        upper[i]  = m + num_std * s
+        lower[i]  = m - num_std * s
+    return upper, middle, lower
+
+
 def _hex(color: str) -> QColor:
     return QColor(color)
 
@@ -155,6 +221,10 @@ class ChartWidget(QWidget):
         self._earnings_next: Optional[str] = None
         self._event_items: list = []   # InfiniteLine + TextItem objects
 
+        # Technical indicators state
+        self._indicators: set[str] = set()
+        self._bb_items:   list     = []   # overlay items on price plot
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -213,6 +283,27 @@ class ChartWidget(QWidget):
         self._vol_item: Optional[pg.BarGraphItem] = None
         self._sma_items: dict[int, pg.PlotDataItem] = {}
 
+        # ── RSI sub-panel ──────────────────────────────────────────────────
+        self._rsi_widget = pg.PlotWidget()
+        self._rsi_widget.setBackground(C_BG)
+        self._rsi_widget.setFixedHeight(80)
+        self._rsi_widget.setVisible(False)
+        self._style_plot(self._rsi_widget.getPlotItem())
+        self._rsi_widget.getPlotItem().showGrid(x=False, y=True, alpha=0.08)
+        self._rsi_widget.getPlotItem().setXLink(self._price_plot)
+        self._rsi_widget.getPlotItem().setYRange(0, 100, padding=0)
+        layout.addWidget(self._rsi_widget)
+
+        # ── MACD sub-panel ─────────────────────────────────────────────────
+        self._macd_widget = pg.PlotWidget()
+        self._macd_widget.setBackground(C_BG)
+        self._macd_widget.setFixedHeight(80)
+        self._macd_widget.setVisible(False)
+        self._style_plot(self._macd_widget.getPlotItem())
+        self._macd_widget.getPlotItem().showGrid(x=False, y=True, alpha=0.08)
+        self._macd_widget.getPlotItem().setXLink(self._price_plot)
+        layout.addWidget(self._macd_widget)
+
     def _style_plot(self, plot: pg.PlotItem) -> None:
         plot.getAxis("bottom").setStyle(tickFont=pg.QtGui.QFont("Consolas", 8))
         plot.getAxis("left").setStyle(tickFont=pg.QtGui.QFont("Consolas", 8))
@@ -222,6 +313,19 @@ class ChartWidget(QWidget):
         plot.getAxis("left").setTextPen(pg.mkPen(C_DIM))
         plot.setMenuEnabled(False)
         plot.hideButtons()
+
+    # ── Technical indicator toggles ────────────────────────────────────────
+
+    def toggle_indicator(self, name: str, enabled: bool) -> None:
+        """Toggle a named indicator: 'bb', 'rsi', 'macd'."""
+        self._indicators.discard(name)
+        if enabled:
+            self._indicators.add(name)
+        if name == "rsi":
+            self._rsi_widget.setVisible(enabled)
+        elif name == "macd":
+            self._macd_widget.setVisible(enabled)
+        self._redraw_indicators()
 
     # ── Public setters ─────────────────────────────────────────────────────
 
@@ -410,6 +514,47 @@ class ChartWidget(QWidget):
             no_t = wl_menu.addAction("No ticker loaded")
             no_t.setEnabled(False)
 
+        # — Alerts ——————————————————————————————————————————————————
+        act_alert = menu.addAction("Set Price Alert…")
+        act_alert.setEnabled(bool(ticker))
+        if ticker:
+            def _set_alert():
+                try:
+                    from lens.db.store import upsert_security, upsert_alert
+                    from PyQt6.QtWidgets import (
+                        QDialog, QDoubleSpinBox, QComboBox,
+                        QDialogButtonBox, QFormLayout,
+                    )
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle(f"Set Alert — {ticker}")
+                    form = QFormLayout(dlg)
+                    cond = QComboBox()
+                    cond.addItems(["Price rises above", "Price falls below"])
+                    price_spin = QDoubleSpinBox()
+                    price_spin.setRange(0.0, 1_000_000.0)
+                    price_spin.setDecimals(4)
+                    price_spin.setSingleStep(0.5)
+                    if self._data:
+                        price_spin.setValue(round(self._data[-1]["close"], 2))
+                    btns = QDialogButtonBox(
+                        QDialogButtonBox.StandardButton.Ok |
+                        QDialogButtonBox.StandardButton.Cancel
+                    )
+                    btns.accepted.connect(dlg.accept)
+                    btns.rejected.connect(dlg.reject)
+                    form.addRow("Condition:", cond)
+                    form.addRow("Price:", price_spin)
+                    form.addRow(btns)
+                    if dlg.exec() == QDialog.DialogCode.Accepted:
+                        cond_type = ("price_above" if cond.currentIndex() == 0
+                                     else "price_below")
+                        upsert_security(ticker=ticker, name=ticker)
+                        upsert_alert(ticker, cond_type, price_spin.value())
+                        self._show_status(f"✓ Alert set for {ticker}")
+                except Exception as exc:
+                    self._show_status(f"Alert error: {exc}")
+            act_alert.triggered.connect(_set_alert)
+
         menu.addSeparator()
 
         # — Copy ———————————————————————————————————————————————————
@@ -471,6 +616,7 @@ class ChartWidget(QWidget):
         self._price_plot.addItem(self._hline, ignoreBounds=True)
         self._price_plot.addItem(self._ohlcv_label, ignoreBounds=True)
         self._sma_items = {}
+        self._bb_items = []
         self._event_items = []
 
         if self._mode == "candles" and len(self._data) <= 500:
@@ -515,6 +661,8 @@ class ChartWidget(QWidget):
             self._vol_plot.setXRange(0, len(self._data) - 1, padding=0.02)
             self._vol_plot.setYRange(0, vols.max() * 1.15, padding=0)
 
+        self._redraw_indicators()
+
     def _redraw_smas(self) -> None:
         for item in self._sma_items.values():
             self._price_plot.removeItem(item)
@@ -540,6 +688,110 @@ class ChartWidget(QWidget):
                 name=f"SMA{period}",
             )
             self._sma_items[period] = item
+
+    def _redraw_indicators(self) -> None:
+        """Redraw all active technical indicators."""
+        # Remove old BB items from price plot
+        for item in self._bb_items:
+            try:
+                self._price_plot.removeItem(item)
+            except Exception:
+                pass
+        self._bb_items = []
+
+        if not self._data:
+            return
+
+        closes = np.array([d["close"] for d in self._data], dtype=float)
+        xs     = np.arange(len(closes))
+
+        if "bb" in self._indicators:
+            self._draw_bb(closes, xs)
+        if "rsi" in self._indicators:
+            self._draw_rsi(closes, xs)
+        else:
+            self._rsi_widget.getPlotItem().clear()
+        if "macd" in self._indicators:
+            self._draw_macd(closes, xs)
+        else:
+            self._macd_widget.getPlotItem().clear()
+
+    def _draw_bb(self, closes: np.ndarray, xs: np.ndarray) -> None:
+        """Draw Bollinger Bands (20, 2σ) as overlay on the price plot."""
+        upper, middle, lower = _compute_bollinger(closes)
+        valid = ~np.isnan(upper)
+        if not valid.any():
+            return
+        xv = xs[valid]
+        pen_bb = pg.mkPen(color="#60a5fa", width=1,
+                          style=Qt.PenStyle.DashLine)
+        upper_curve = self._price_plot.plot(xv, upper[valid], pen=pen_bb,
+                                            name="BB+")
+        lower_curve = self._price_plot.plot(xv, lower[valid], pen=pen_bb,
+                                            name="BB-")
+        fill = pg.FillBetweenItem(upper_curve, lower_curve,
+                                  brush=pg.mkBrush(96, 165, 250, 18))
+        self._price_plot.addItem(fill)
+        self._bb_items.extend([upper_curve, lower_curve, fill])
+
+    def _draw_rsi(self, closes: np.ndarray, xs: np.ndarray) -> None:
+        """Draw RSI(14) in the RSI sub-panel."""
+        pi = self._rsi_widget.getPlotItem()
+        pi.clear()
+        rsi = _compute_rsi(closes)
+        valid = ~np.isnan(rsi)
+        if not valid.any():
+            return
+        xv = xs[valid]
+        # RSI line
+        pi.plot(xv, rsi[valid],
+                pen=pg.mkPen(C_AMB, width=1.5))
+        # Overbought/oversold bands
+        for level, color in ((70, "#ef4444"), (30, "#22c55e"), (50, "#333333")):
+            line = pg.InfiniteLine(
+                pos=level, angle=0, movable=False,
+                pen=pg.mkPen(color, width=1,
+                             style=Qt.PenStyle.DotLine)
+            )
+            pi.addItem(line)
+        pi.setYRange(0, 100, padding=0.05)
+        pi.setXRange(xs[0], xs[-1], padding=0.02)
+        # Label
+        lbl = pg.TextItem("RSI 14", color=C_DIM, anchor=(0, 0))
+        lbl.setFont(pg.QtGui.QFont("Consolas", 8))
+        lbl.setPos(xv[0], 95)
+        pi.addItem(lbl, ignoreBounds=True)
+
+    def _draw_macd(self, closes: np.ndarray, xs: np.ndarray) -> None:
+        """Draw MACD(12,26,9) histogram + lines in the MACD sub-panel."""
+        pi = self._macd_widget.getPlotItem()
+        pi.clear()
+        macd_line, sig_line, histogram = _compute_macd(closes)
+        # Histogram bars
+        colors = [
+            pg.mkBrush(C_POS) if h >= 0 else pg.mkBrush(C_NEG)
+            for h in histogram
+        ]
+        bars = pg.BarGraphItem(x=xs, height=histogram, width=0.8,
+                               brushes=colors, pen=pg.mkPen(None))
+        pi.addItem(bars)
+        # MACD and signal lines
+        pi.plot(xs, macd_line,
+                pen=pg.mkPen(C_AMB, width=1.2), name="MACD")
+        pi.plot(xs, sig_line,
+                pen=pg.mkPen("#60a5fa", width=1.0), name="Signal")
+        # Zero line
+        zero = pg.InfiniteLine(pos=0, angle=0, movable=False,
+                               pen=pg.mkPen(C_DIM, width=1))
+        pi.addItem(zero)
+        pi.setXRange(xs[0], xs[-1], padding=0.02)
+        # Label
+        lbl = pg.TextItem("MACD 12/26/9", color=C_DIM, anchor=(0, 1))
+        lbl.setFont(pg.QtGui.QFont("Consolas", 8))
+        vr = pi.viewRange()
+        y_top = vr[1][1] if vr else histogram.max()
+        lbl.setPos(xs[0], y_top)
+        pi.addItem(lbl, ignoreBounds=True)
 
     def _on_mouse_moved(self, evt) -> None:
         if not self._data:

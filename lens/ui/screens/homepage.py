@@ -215,6 +215,7 @@ class HomepageScreen(QWidget):
         self._markets_worker = None
         self._wl_worker = None
         self._portfolio_worker = None
+        self._news_worker = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -237,19 +238,17 @@ class HomepageScreen(QWidget):
         bottom = QSplitter(Qt.Orientation.Horizontal)
         bottom.setHandleWidth(4)
 
-        # News WIP
-        news = QFrame()
-        news.setProperty("class", "panel")
-        news_layout = QVBoxLayout(news)
-        news_layout.setContentsMargins(12, 8, 12, 8)
-        news_layout.addWidget(_section("NEWS"))
-        wip = QLabel("WIP  —  market news feed coming soon")
-        wip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        wip.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 13px;"
-            "color: #333333; letter-spacing: 2px;")
-        news_layout.addWidget(wip, 1)
-        bottom.addWidget(news)
+        # News feed
+        news_frame = QFrame()
+        news_frame.setProperty("class", "panel")
+        news_outer = QVBoxLayout(news_frame)
+        news_outer.setContentsMargins(0, 0, 0, 0)
+        news_outer.setSpacing(0)
+        news_outer.addWidget(_section("MARKET NEWS"))
+        from lens.ui.widgets.news_widget import NewsWidget
+        self._news_widget = NewsWidget()
+        news_outer.addWidget(self._news_widget, 1)
+        bottom.addWidget(news_frame)
 
         # Portfolio graph
         self._port_graph = PortfolioGraphPanel()
@@ -271,11 +270,12 @@ class HomepageScreen(QWidget):
         self._load_markets()
         self._load_watchlist()
         self._load_portfolio_nav()
+        self._load_news()
 
     def cleanup(self) -> None:
         """Stop all background workers cleanly (called before widget deletion)."""
         self._refresh_timer.stop()
-        for w in (self._markets_worker, self._wl_worker, self._portfolio_worker):
+        for w in (self._markets_worker, self._wl_worker, self._portfolio_worker, self._news_worker):
             if w is None:
                 continue
             try:
@@ -330,3 +330,12 @@ class HomepageScreen(QWidget):
         self._portfolio_worker = PortfolioNAVWorker(account)
         self._portfolio_worker.result.connect(self._port_graph.update_nav)
         self._portfolio_worker.start()
+
+    def _load_news(self) -> None:
+        from lens.ui.workers import FetchNewsWorker
+        if self._news_worker and self._is_running(self._news_worker):
+            return
+        self._news_widget.set_loading()
+        self._news_worker = FetchNewsWorker(parent=self)
+        self._news_worker.result.connect(self._news_widget.load_news)
+        self._news_worker.start()

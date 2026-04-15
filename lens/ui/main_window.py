@@ -32,10 +32,12 @@ _SCREEN_TYPES = [
     ("HOMEPAGE",           "homepage"),
     ("QUOTE",              "quote"),
     ("CHART",              "chart"),
+    ("COMPARISON",         "comparison"),
     ("PORTFOLIO",          "portfolio"),
     ("SCREENER",           "screener"),
     ("MACRO DASHBOARD",    "macro"),
     ("ECONOMIC CALENDAR",  "calendar"),
+    ("ALERTS",             "alerts"),
     ("SETTINGS",           "settings"),
     ("DEVLOGS",            "devlogs"),
 ]
@@ -346,6 +348,23 @@ class MainWindow(QMainWindow):
         self._tab_bar.tab_add_requested.connect(self._add_tab)
         self._top_bar.search.ticker_selected.connect(self._open_quote)
 
+        # Toast notification overlay (hidden until needed)
+        self._toast = QLabel(root)
+        self._toast.setStyleSheet(
+            "background: #451a03; color: #f59e0b; border: 1px solid #f59e0b; "
+            "font-family: Consolas; font-size: 12px; font-weight: 700; "
+            "padding: 8px 16px; border-radius: 4px;"
+        )
+        self._toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._toast.hide()
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._toast.hide)
+
+        # Alert monitor
+        self._alert_monitor = None
+        self._start_alert_monitor()
+
         self._restore_tabs()
 
     # ── Screen factory ────────────────────────────────────────────────────
@@ -374,6 +393,16 @@ class MainWindow(QMainWindow):
         if screen_type == "calendar":
             from lens.ui.screens.calendar import EconomicCalendarScreen
             screen = EconomicCalendarScreen(self._config)
+            screen.open_quote.connect(self._open_quote_from_ticker)
+            return screen
+        if screen_type == "alerts":
+            from lens.ui.screens.alerts import AlertsScreen
+            screen = AlertsScreen(self._config)
+            screen.open_quote.connect(self._open_quote_from_ticker)
+            return screen
+        if screen_type == "comparison":
+            from lens.ui.screens.comparison import ComparisonScreen
+            screen = ComparisonScreen(self._config)
             screen.open_quote.connect(self._open_quote_from_ticker)
             return screen
         if screen_type == "portfolio":
@@ -407,7 +436,7 @@ class MainWindow(QMainWindow):
         save: bool = True,
     ) -> int:
         # Singleton screens — reuse existing tab instead of opening a second one
-        if screen_type in ("macro", "calendar"):
+        if screen_type in ("macro", "calendar", "alerts"):
             for i, tab in enumerate(self._tab_data):
                 if tab["type"] == screen_type:
                     if activate:
@@ -592,9 +621,45 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    # ── Alert monitor ─────────────────────────────────────────────────────
+
+    def _start_alert_monitor(self) -> None:
+        from lens.ui.workers import AlertMonitorWorker
+        self._alert_monitor = AlertMonitorWorker(self)
+        self._alert_monitor.alert_triggered.connect(self._on_alert_triggered)
+        self._alert_monitor.start()
+
+    def _on_alert_triggered(
+        self, ticker: str, condition: str, threshold: float, price: float
+    ) -> None:
+        cond_text = "above" if condition == "price_above" else "below"
+        msg = f"ALERT  {ticker}  price {cond_text} {threshold:,.2f}  (now {price:,.2f})"
+        self._show_toast(msg)
+
+    def _show_toast(self, msg: str, duration_ms: int = 6000) -> None:
+        self._toast.setText(msg)
+        self._toast.adjustSize()
+        # Position top-centre of the window
+        w = self._toast.width() + 32
+        self._toast.setFixedWidth(w)
+        x = (self.width() - w) // 2
+        self._toast.move(x, 44)   # just below the top bar
+        self._toast.raise_()
+        self._toast.show()
+        self._toast_timer.start(duration_ms)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not self._toast.isHidden():
+            w = self._toast.width()
+            self._toast.move((self.width() - w) // 2, 44)
+
     # ── Cleanup ───────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if self._alert_monitor:
+            self._alert_monitor.stop()
+            self._alert_monitor.wait(2000)
         for tab in self._tab_data:
             self._stop_screen_threads(tab["screen"])
         event.accept()
