@@ -670,7 +670,8 @@ class FetchDeepDiveWorker(QThread):
                         self.esg_ready.emit(esg if esg else {})
                         _log.debug("DeepDive ESG ready — %s", self.ticker)
                     except Exception as e:
-                        _log.error("DeepDive ESG failed — %s: %s", self.ticker, e)
+                        # 404 is normal for EU tickers without Sustainalytics coverage
+                        _log.debug("DeepDive ESG unavailable — %s: %s", self.ticker, e)
                         self.esg_ready.emit({})
 
                 await asyncio.gather(
@@ -728,10 +729,10 @@ class FetchMacroWorker(QThread):
                         )
                         resp = await c.get(url, headers={"Accept": "application/json"})
                         resp.raise_for_status()
-                        obs = (
-                            resp.json()["dataSets"][0]["series"]
-                            ["0:0:0:0:0:0"]["observations"]
-                        )
+                        series = resp.json()["dataSets"][0]["series"]
+                        # Key format can vary (e.g. "0:0:0:0:0:0"); take first key dynamically
+                        series_key = next(iter(series))
+                        obs = series[series_key]["observations"]
                         last_key = str(max(int(k) for k in obs.keys()))
                         rate = float(obs[last_key][0])
                         FetchMacroWorker._ecb_cache = (rate, _time.time())
@@ -1191,35 +1192,32 @@ class FetchNewsWorker(QThread):
 
     async def _fetch(self) -> list:
         import httpx
-        params: dict = {"count": "30", "lang": "en"}
-        if self.ticker:
-            params["tickers"] = self.ticker
-        else:
-            params["tickers"] = "^FCHI,^GDAXI,^STOXX50E"
-        url = "https://query1.finance.yahoo.com/v2/finance/news"
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
+        from datetime import datetime as _dt
+        # Use search API — /v2/finance/news is dead (500s)
+        query = self.ticker if self.ticker else "europe stocks markets"
+        url = "https://query1.finance.yahoo.com/v1/finance/search"
+        params = {
+            "q":                query,
+            "newsCount":        "30",
+            "quotesCount":      "0",
+            "enableFuzzyQuery": "false",
         }
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(url, params=params, headers=headers)
             r.raise_for_status()
-            items = r.json().get("items", {}).get("result", [])
+            items = r.json().get("news", [])
             out = []
             for it in items:
-                content = it.get("content", {})
-                pub_ts = content.get("pubDate", "")
-                # Format: "2024-01-15T10:30:00Z"
+                ts = it.get("providerPublishTime", 0)
                 try:
-                    from datetime import datetime
-                    dt = datetime.strptime(pub_ts[:19], "%Y-%m-%dT%H:%M:%S")
-                    pub_str = dt.strftime("%d %b  %H:%M")
+                    pub_str = _dt.utcfromtimestamp(ts).strftime("%d %b  %H:%M")
                 except Exception:
-                    pub_str = pub_ts[:16]
+                    pub_str = ""
                 out.append({
-                    "title":     content.get("title", ""),
-                    "publisher": content.get("provider", {}).get("displayName", ""),
-                    "link":      content.get("canonicalUrl", {}).get("url", ""),
+                    "title":     it.get("title", ""),
+                    "publisher": it.get("publisher", ""),
+                    "link":      it.get("link", ""),
                     "published": pub_str,
                 })
             return out
