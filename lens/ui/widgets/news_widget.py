@@ -86,27 +86,29 @@ class NewsWidget(QFrame):
         self._placeholder.setStyleSheet(f"color: {C_DIM}; font-size: 12px; padding: 20px;")
         self._list_lay.insertWidget(0, self._placeholder)
 
-    def load_news(self, items: list) -> None:
-        # Clear existing rows (keep stretch at end)
-        while self._list_lay.count() > 1:
-            item = self._list_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+    def _clear_rows(self) -> None:
+        to_delete = []
+        for i in range(self._list_lay.count()):
+            it = self._list_lay.itemAt(i)
+            w = it.widget() if it else None
+            if isinstance(w, _HeadlineRow):
+                to_delete.append(w)
+        for w in to_delete:
+            self._list_lay.removeWidget(w)
+            w.deleteLater()
 
+    def load_news(self, items: list) -> None:
+        self._clear_rows()
         if not items:
             self._placeholder.setText("No news available.")
-            self._list_lay.insertWidget(0, self._placeholder)
+            self._placeholder.show()
             return
-
-        self._placeholder.setParent(None)
+        self._placeholder.hide()
         for it in items:
             row = _HeadlineRow(it)
             self._list_lay.insertWidget(self._list_lay.count() - 1, row)
 
     def set_loading(self) -> None:
+        self._clear_rows()
         self._placeholder.setText("Loading news…")
-        while self._list_lay.count() > 1:
-            item = self._list_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._list_lay.insertWidget(0, self._placeholder)
+        self._placeholder.show()

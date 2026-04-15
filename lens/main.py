@@ -5,6 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+np.seterr(over="ignore")  # suppress pyqtgraph axis tick overflow warnings
+
 
 def main() -> None:
     from lens.config import ensure_dirs
